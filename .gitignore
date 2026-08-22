@@ -1,0 +1,8 @@
+.DS_Store
+.venv
+__pycache__/
+*.pyc
+node_modules/
+test_bad_ring.wav
+ref_notes.csv
+.vercel

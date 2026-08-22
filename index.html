@@ -1,0 +1,195 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="theme-color" content="#0c0d10">
+  <link rel="manifest" href="./manifest.json">
+  <link rel="icon" href="./icon.svg">
+  <title>Pluck Trainer</title>
+  <style>
+    :root {
+      --bg: #0c0d10;
+      --panel: #14171d;
+      --ink: #e8e4d9;
+      --muted: #8b909a;
+      --line: #2a3038;
+      --orange: #f59e3b;
+      --cyan: #22d3ee;
+      --green: #4ade80;
+      --red: #ef4444;
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; background: var(--bg); color: var(--ink); font: 16px/1.4 -apple-system, system-ui, sans-serif; }
+    button, input, select { font: inherit; color: inherit; }
+    button { min-height: 48px; min-width: 48px; border-radius: 12px; border: 1px solid var(--line); background: var(--panel); }
+    button.primary { background: var(--orange); color: #1a1208; border: 0; font-weight: 700; padding: 0 22px; }
+    button.stop { background: var(--red); color: #fff; }
+    button.on { outline: 2px solid var(--cyan); }
+    #app { max-width: 980px; margin: 0 auto; padding: 12px 12px 28px; padding-top: env(safe-area-inset-top); }
+    .transport { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+    #start { font-size: 1.2rem; }
+    .bpm { display: flex; align-items: center; gap: 4px; }
+    #bpm-val { min-width: 64px; font-size: 1.4rem; font-variant-numeric: tabular-nums; background: transparent; border: 0; }
+    #pattern-btn { flex: 1; min-width: 180px; text-align: left; padding: 8px 12px; }
+    #pattern-btn strong { display: block; }
+    #meter { position: relative; width: 90px; height: 14px; background: #1c2128; border-radius: 8px; overflow: hidden; }
+    #meter-fill { height: 100%; width: 0; background: var(--green); }
+    #meter.low #meter-fill { background: var(--orange); }
+    #meter.clip #meter-fill { background: var(--red); }
+    .badge { font-size: 11px; color: var(--muted); }
+    #warn { background: #3b1515; color: #fecaca; padding: 8px 12px; border-radius: 10px; margin-top: 8px; }
+    .clock-wrap { display: flex; justify-content: center; margin: 12px 0; }
+    #clock { width: min(72vw, 560px); height: min(72vw, 560px); background: var(--panel); border-radius: 16px; }
+    #strip { width: 100%; height: 120px; display: block; background: var(--panel); border-radius: 12px; }
+    #fingers { display: grid; gap: 8px; margin-top: 12px; }
+    .fbar { display: grid; grid-template-columns: 72px 1fr 1fr 1fr; gap: 8px; align-items: center; }
+    .fbar i { display: block; font-size: 10px; color: var(--muted); font-style: normal; }
+    .track { position: relative; height: 10px; background: #1c2128; border-radius: 6px; }
+    .track b { position: absolute; left: 0; top: 0; bottom: 0; width: 8px; background: var(--cyan); border-radius: 6px; }
+    .track:not(.center) b { width: 40%; }
+    .track.center b { width: 8px; margin-left: -4px; }
+    #scores { margin-top: 12px; }
+    .score { display: grid; grid-template-columns: 110px 1fr 36px; gap: 8px; align-items: center; margin: 6px 0; }
+    .score .track b { position: relative; display: block; height: 10px; background: var(--green); }
+    .diag { color: var(--orange); }
+    .footer { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-top: 14px; color: var(--muted); }
+    .modal { position: fixed; inset: 0; background: rgba(0,0,0,.65); display: flex; align-items: flex-end; justify-content: center; z-index: 5; }
+    .modal[hidden], [hidden] { display: none !important; }
+    .sheet { background: var(--panel); width: min(640px, 100%); max-height: 92vh; overflow: auto; border-radius: 16px 16px 0 0; padding: 16px; }
+    .picker-row, .hist-row { display: flex; justify-content: space-between; width: 100%; text-align: left; margin: 6px 0; padding: 10px; }
+    .pat-dots { display: flex; gap: 8px; flex-wrap: wrap; }
+    .pat-dots .beat { display: flex; gap: 3px; padding-right: 6px; border-right: 1px solid var(--line); }
+    .dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
+    .dot.rest { background: transparent; border: 1px solid #64748b; }
+    .dot.acc { box-shadow: 0 0 0 2px #fff; }
+    label { display: block; margin: 8px 0; }
+    input, select { background: #0c0d10; border: 1px solid var(--line); border-radius: 8px; padding: 8px; }
+    .status.bad { color: var(--red); }
+    .status.ok { color: var(--green); }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    th, td { border-bottom: 1px solid var(--line); padding: 4px 6px; text-align: right; }
+    th:first-child, td:first-child { text-align: left; }
+    #log { font: 11px ui-monospace, monospace; color: var(--muted); max-height: 72px; overflow: auto; margin-top: 8px; }
+    #resume { position: fixed; inset: 0; background: rgba(0,0,0,.8); display: flex; align-items: center; justify-content: center; z-index: 9; font-size: 1.4rem; }
+    .dev { padding: 16px; }
+    tr.ok { color: var(--green); }
+    tr.bad { color: var(--red); }
+    @media (orientation: landscape) and (min-width: 800px) {
+      .layout { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; align-items: start; }
+      #clock { width: min(46vw, 520px); height: min(46vw, 520px); }
+    }
+  </style>
+</head>
+<body>
+  <div id="app">
+    <div class="transport">
+      <button id="start" class="primary">Start</button>
+      <div class="bpm">
+        <button id="bpm-down">−</button>
+        <button id="bpm-val">80</button>
+        <button id="bpm-up">+</button>
+        <button id="tap">Tap</button>
+      </div>
+      <button id="pattern-btn"><strong>Even triplets</strong></button>
+      <select id="groove">
+        <option value="click">click</option>
+        <option value="clickSub">clickSub</option>
+        <option value="straight8">straight8</option>
+        <option value="straight16">straight16</option>
+        <option value="shuffle">shuffle</option>
+        <option value="halftime">halftime</option>
+      </select>
+      <div>
+        <div id="meter"><div id="meter-fill"></div></div>
+        <div id="meter-db" class="badge">–</div>
+      </div>
+      <div class="badge">
+        <div id="dev-badge">no device</div>
+        <div><span id="sr-badge">— Hz</span> · <span id="lat-badge">0 ms</span></div>
+      </div>
+      <button id="settings-btn">Settings</button>
+      <button id="history-btn">History</button>
+    </div>
+    <div id="warn" hidden></div>
+    <div class="layout">
+      <div class="clock-wrap"><canvas id="clock"></canvas></div>
+      <div>
+        <canvas id="strip"></canvas>
+        <div id="fingers"></div>
+        <div id="scores"></div>
+      </div>
+    </div>
+    <div class="footer">
+      <span id="phase">idle</span>
+      <span id="bars">0 bars</span>
+      <span id="ramp-stat"></span>
+      <button id="end">End session</button>
+    </div>
+    <div id="log"></div>
+  </div>
+
+  <div id="picker" class="modal" hidden>
+    <div class="sheet">
+      <h2>Patterns</h2>
+      <div id="picker-list"></div>
+      <h3>New custom</h3>
+      <input id="custom-name" placeholder="Name">
+      <input id="custom-pat" placeholder="rmi rmi rmi rmi">
+      <div id="custom-preview" class="pat-dots"></div>
+      <div id="custom-status" class="status"></div>
+      <button id="save-custom" class="primary" disabled>Save custom</button>
+      <button data-close="picker">Close</button>
+    </div>
+  </div>
+
+  <div id="settings" class="modal" hidden>
+    <div class="sheet">
+      <h2>Settings</h2>
+      <label>Input device <select id="set-device"></select></label>
+      <label>Input mode <select id="set-mode"><option value="di">DI</option><option value="mic">Mic (timing only)</option></select></label>
+      <label>Mic sensitivity <input id="set-sens" type="number" min="0.1" max="0.5" step="0.05"></label>
+      <label>Count-in bars <input id="set-countin" type="number" min="0" max="8"></label>
+      <label>Dropout bars <input id="set-dropbars" type="number" min="0" max="8"></label>
+      <label>Dropout every <input id="set-dropevery" type="number" min="1" max="32"></label>
+      <label><input id="set-ramp" type="checkbox"> Tempo ramp</label>
+      <label>Ramp step <input id="set-rampstep" type="number"></label>
+      <label>Ramp every bars <input id="set-rampbars" type="number"></label>
+      <label><input id="set-rampclean" type="checkbox"> Ramp requires clean block</label>
+      <label><input id="set-ticks" type="checkbox"> Subdivision ticks</label>
+      <label>Accent ratio <input id="set-accent" type="number" step="0.05"></label>
+      <label>Score window (bars) <input id="set-window" type="number"></label>
+      <label>Latency compensation (ms) <input id="set-lat" type="number" min="-100" max="300" step="0.5"></label>
+      <div id="lat-live" class="badge"></div>
+      <div id="cal-readout" class="badge"></div>
+      <button id="cal-auto">Auto-cal from last 8 hits</button>
+      <button id="cal-apply">Save latency</button>
+      <button id="set-save" class="primary">Done</button>
+    </div>
+  </div>
+
+  <div id="summary" class="modal" hidden>
+    <div class="sheet">
+      <h2>Session</h2>
+      <div id="summary-body"></div>
+      <button id="save-session" class="primary">Save</button>
+      <button id="export-csv">Export CSV</button>
+      <button data-close="summary">Close</button>
+    </div>
+  </div>
+
+  <div id="history" class="modal" hidden>
+    <div class="sheet">
+      <h2>History</h2>
+      <canvas id="hist-chart" style="width:100%;height:140px"></canvas>
+      <div id="hist-list"></div>
+      <button data-close="history">Close</button>
+    </div>
+  </div>
+
+  <button id="resume" hidden>Tap to resume audio</button>
+  <script type="module" src="./src/main.js"></script>
+</body>
+</html>

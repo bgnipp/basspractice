@@ -1,0 +1,38 @@
+---
+description: Pluck Trainer product context, DSP ground truth, and implementation constraints
+alwaysApply: true
+---
+
+# Pluck Trainer
+
+Three-finger (r-m-i) bass plucking trainer. Browser app (desktop + iOS Safari) scores each pluck against an app-generated metronome/drum grid. Full spec: `docs/PLUCK-TRAINER.md`. Agent entry: `AGENTS.md`.
+
+## Before coding
+
+Read `docs/PLUCK-TRAINER.md` Part A in the order in §0, then the **Appendix** (pinned implementation details — where Part A and the Appendix differ, the Appendix wins). Treat `ref/rmi_analyzer.py` as ground truth for onset times and per-note features. Do not modify `ref/` without re-validating §12.
+
+## Decided (spec §15 + review + Appendix)
+
+- Vanilla JS + Canvas for M0–M3 (no React).
+- No bundler for M0–M3: plain static ES modules on Vercel; worklet loaded via same-origin `addModule('/src/audio/worklet.js')`, never a Blob URL. Single-file Vite build is M5 (Appendix A1).
+- Grooves/shuffle affect accompaniment sounds only — never grid slot times (Appendix A4).
+- Centroid/FFT on the main thread from a posted 40 ms buffer (v1).
+- Beat clock shows one beat; pattern-ring view is M4+.
+- Web app for v1, not native iOS. If M0's constraint check fails (iOS won't disable voice processing on the interface input), fall back to Capacitor + native audio-input plugin feeding the same JS worklet. Full Swift is the v2 path (Watch haptics).
+
+## Hard constraints
+
+- **Single-clock rule:** measure only on `AudioContext` time. `setInterval` may wake the scheduler; it is never the timing reference.
+- Never connect input to `destination` (interface does direct monitoring).
+- `getUserMedia` MUST use `echoCancellation: false, autoGainControl: false, noiseSuppression: false`.
+- `AudioWorklet` only — no `ScriptProcessorNode`. Derive constants from `audioContext.sampleRate`.
+- Finger labels come from the matched grid slot, never a running counter.
+- High-pass at 1 kHz before the envelope. `minGap = 0.5 * gridStep`, clamp [20 ms, 150 ms], update when bpm/pattern changes.
+- Browser detector must match Python on the same WAV before scoring work (§12): same onset count; onset times ±1 ms *after subtracting the median browser−reference offset* (the Python ref is non-causal — `sosfiltfilt` + centered RMS — so a constant 2–5 ms lag is expected; its std must be < 1 ms); peak ±2 %; centroid ±5 %.
+- The dev "analyze file" mode must replicate Python preprocessing: channel 0, normalize buffer to peak 1.0, file-global envelope max (two-pass). Live mode uses the running max (`envMax = max(envMax*0.9995, env)`, floor `1e-4`).
+- Input may be stereo; the worklet reads channel 0 only.
+- `getUserMedia` needs a secure context: iPad testing via Vercel deploys or a local HTTPS dev server, never plain HTTP/file://.
+
+## Layout and milestones
+
+Follow §14 file layout. Implement in milestone order (§11) and do not proceed past a milestone until its Appendix A6 acceptance checks pass. Current target: **M0** (AudioContext, worklet, getUserMedia, input meter, Start on iPad Safari). Do not start scoring (M3) until M2 validates against `ref/` via the A7 harness. Use the exact filter coefficients in Appendix A2 and the detector pseudocode in Appendix A3 — do not redesign these.

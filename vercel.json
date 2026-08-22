@@ -1,0 +1,11 @@
+{
+  "headers": [
+    {
+      "source": "/src/audio/worklet.js",
+      "headers": [
+        { "key": "Cache-Control", "value": "no-cache" },
+        { "key": "Content-Type", "value": "application/javascript; charset=utf-8" }
+      ]
+    }
+  ]
+}

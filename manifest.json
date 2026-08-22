@@ -1,0 +1,16 @@
+{
+  "name": "Pluck Trainer",
+  "short_name": "Pluck",
+  "display": "standalone",
+  "background_color": "#0c0d10",
+  "theme_color": "#0c0d10",
+  "start_url": "./",
+  "scope": "./",
+  "icons": [
+    {
+      "src": "./icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml"
+    }
+  ]
+}
