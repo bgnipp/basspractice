@@ -16,7 +16,9 @@ export function renderFingerBars(el, ema, fingers, micMode) {
   }).join("");
 }
 
-export function renderScores(el, scores, diagnosis, micMode) {
+export function renderScores(el, scores, diagnosis, micMode, extra = {}) {
+  const heard = extra.scoresHeard || null;
+  const ratio = extra.ratio || 1;
   const keys = ["timing", "attackEven", "toneEven", "fingerBalance", "clean", "accent"].filter((k) => {
     if (k === "toneEven" && micMode) return false;
     if (k === "accent" && scores[k] == null) return false;
@@ -24,10 +26,15 @@ export function renderScores(el, scores, diagnosis, micMode) {
   });
   el.innerHTML = keys.map((k) => {
     const v = scores[k];
+    const dual = ratio > 1 && heard && (k === "attackEven" || k === "fingerBalance");
+    const hv = dual ? heard[k] : null;
     return `<div class="score">
       <span>${k}</span>
-      <div class="track"><b style="width:${v}%"></b></div>
-      <em>${v.toFixed(0)}</em>
+      <div class="track">
+        <b style="width:${v}%"></b>
+        ${hv != null ? `<i class="heard-mark" style="left:${hv}%"></i>` : ""}
+      </div>
+      <em>${hv != null ? `${v.toFixed(0)} → ${hv.toFixed(0)}` : v.toFixed(0)}</em>
     </div>`;
   }).join("") + `<p class="diag">${(diagnosis || []).join(" · ")}</p>`;
 }
@@ -108,11 +115,23 @@ export function renderSummary(el, summary, config) {
        timing spread: ${balance.timingSpreadMs.toFixed(1)} ms ·
        ghosts ${cleanliness.ghosts} / missed ${cleanliness.missed} / doubles ${cleanliness.doubles}</p>
     <p>scores:
-      ${Object.entries(scores).map(([k, v]) => `${k} ${v.toFixed(0)}`).join(" · ")}
+      ${Object.entries(scores).map(([k, v]) => {
+        const hv = summary.scoresHeard && (k === "attackEven" || k === "fingerBalance") ? summary.scoresHeard[k] : null;
+        return hv != null ? `${k} ${v.toFixed(0)}→${hv.toFixed(0)}` : `${k} ${v.toFixed(0)}`;
+      }).join(" · ")}
     </p>
+    ${compLine(summary)}
     <p class="diag">${diagnosis.join(" · ")}</p>
     <div class="hists"></div>
   `;
+}
+
+function compLine(summary) {
+  const c = summary.compression;
+  if (!c || c.ratio <= 1) return "";
+  const thr = c.thresholdDb == null ? "—" : `${c.thresholdDb.toFixed(1)} dBFS`;
+  const dep = summary.dependence == null ? 0 : summary.dependence;
+  return `<p>compression ${c.ratio}:1 · dependence +${dep.toFixed(0)} · threshold ${thr}</p>`;
 }
 
 export function renderHistory(el, sessions, onOpen) {

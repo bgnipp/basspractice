@@ -12,6 +12,7 @@ import {
 } from "./store.js";
 import { createClock } from "./ui/clock.js";
 import { createStrip } from "./ui/strip.js";
+import { createReview } from "./ui/review.js";
 import {
   renderFingerBars, renderScores, renderPickerList, bindCustomEditor,
   renderSummary, renderHistory, renderHistoryChart, renderDots,
@@ -34,6 +35,7 @@ const settings = Object.assign({
   sensitivity: 0.15,
   deviceId: "",
   latencyCompMs: 0,
+  compressionRatio: 1,
 }, loadSettings());
 
 const state = {
@@ -62,6 +64,11 @@ const state = {
   raf: 0,
   lastMeterPeak: 0,
   devices: [],
+  sessionLoopOffset: 0,
+  barsAtSegmentStart: 0,
+  segmentCountIn: 1,
+  nextLoop: 0,
+  review: null,
 };
 
 if (new URLSearchParams(location.search).get("dev") === "analyze") {
@@ -76,11 +83,13 @@ function boot() {
   const strip = createStrip($("strip"));
   state.clock = clock;
   state.strip = strip;
+  state.review = createReview($("review-wrap"));
 
   bindTransport();
   bindModals();
   fillPatternLabel();
   applySettingsToForm();
+  state.scorer.setRatio(settings.compressionRatio || 1);
   updateMeter(0, 0);
   clock.resize();
   strip.resize();
@@ -91,9 +100,9 @@ function boot() {
 
   document.addEventListener("visibilitychange", onVisibility);
   $("resume").onclick = async () => {
-    if (state.ctx) await resumeContext(state.ctx);
     $("resume").hidden = true;
-    if (state.phase === "paused") setPhase("running");
+    if (state.phase === "paused") await resumeSession();
+    else if (state.ctx) await resumeContext(state.ctx);
   };
 
   logM0("ready — tap Start (needs a user gesture for audio)");
@@ -117,6 +126,10 @@ function bindTransport() {
   $("settings-btn").onclick = () => openModal("settings");
   $("history-btn").onclick = openHistory;
   $("end").onclick = () => endSession(true);
+  $("pause").onclick = () => {
+    if (state.phase === "paused") resumeSession();
+    else pauseSession();
+  };
 }
 
 function bindModals() {
@@ -146,6 +159,10 @@ function bindModals() {
   $("cal-auto").onclick = startAutoCal;
   $("export-csv").onclick = exportCsv;
   $("save-session").onclick = () => endSession(true);
+  $("open-review").onclick = () => {
+    closeModal("summary");
+    showReview();
+  };
 }
 
 function pickPattern(p) {
@@ -223,11 +240,13 @@ function readSettingsForm() {
   settings.sensitivity = +$("set-sens").value;
   settings.deviceId = $("set-device").value;
   settings.latencyCompMs = +$("set-lat").value;
+  settings.compressionRatio = +$("set-comp").value || 1;
   saveSettings({ ...settings, patternId: state.patternId, pattern: state.pattern, groove: state.groove, bpm: state.bpm });
   if (state.worklet) {
     state.worklet.port.postMessage({ type: "config", relThr: relThr() });
   }
   if (state.scheduler) state.scheduler.setTicks(settings.ticksOn);
+  state.scorer.setRatio(settings.compressionRatio);
   $("lat-badge").textContent = `${settings.latencyCompMs.toFixed(0)} ms`;
 }
 
@@ -245,6 +264,7 @@ function applySettingsToForm() {
   $("set-mode").value = settings.inputMode;
   $("set-sens").value = settings.sensitivity;
   $("set-lat").value = settings.latencyCompMs;
+  $("set-comp").value = String(settings.compressionRatio || 1);
   $("bpm-val").textContent = String(state.bpm);
   $("lat-badge").textContent = `${settings.latencyCompMs.toFixed(0)} ms`;
   $("groove").value = state.groove;
@@ -298,8 +318,7 @@ async function ensureAudio() {
   if (!state.scheduler) state.scheduler = createScheduler(state.ctx);
   state.ctx.onstatechange = () => {
     if (state.ctx.state === "suspended" && (state.phase === "running" || state.phase === "countIn")) {
-      setPhase("paused");
-      $("resume").hidden = false;
+      pauseSession({ audioSuspend: true });
     }
   };
 }
@@ -351,8 +370,10 @@ async function startSession() {
     inputMode: settings.inputMode,
     latencyCompMs: settings.latencyCompMs,
     durationBars: null,
+    compression: { ratio: settings.compressionRatio || 1 },
   };
   state.scorer.reset();
+  state.scorer.setRatio(settings.compressionRatio || 1);
   state.clock.reset();
   state.strip.reset();
   state.clock.setGrid(grid);
@@ -361,7 +382,12 @@ async function startSession() {
   state.peakRoll = 1e-4;
   state.lastScores = null;
   state.barsDone = 0;
+  state.sessionLoopOffset = 0;
+  state.barsAtSegmentStart = 0;
+  state.segmentCountIn = settings.countInBars;
+  state.nextLoop = 0;
   state.startedAt = new Date().toISOString();
+  hideReview();
 
   const step = grid.gridStep;
   state.worklet.port.postMessage({ type: "config", minGapS: 0.5 * step, relThr: relThr() });
@@ -375,6 +401,8 @@ async function startSession() {
   setPhase(settings.countInBars > 0 ? "countIn" : "running");
   $("start").textContent = "Stop";
   $("start").classList.add("stop");
+  $("pause").hidden = false;
+  $("pause").textContent = "Pause";
   loop();
 }
 
@@ -386,12 +414,80 @@ function endSession(save) {
   setPhase("ended");
   $("start").textContent = "Start";
   $("start").classList.remove("stop");
+  $("pause").hidden = true;
+  hideReview();
   if (summary && summary.out.all) {
     renderSummary($("summary-body"), summary, { ...state.config, bpm: state.scheduler?.getBpm() || state.bpm });
     drawHistograms($("summary-body").querySelector(".hists"), state.scorer.hits);
     openModal("summary");
     if (save) persistSession(summary);
   }
+}
+
+function pauseSession(opts = {}) {
+  if (state.phase !== "running" && state.phase !== "countIn") return;
+  cancelAnimationFrame(state.raf);
+  state.scheduler?.pause();
+  const bpm = state.scheduler?.getBpm() || state.bpm;
+  const beatDur = 60 / bpm;
+  const elapsed = state.ctx ? state.ctx.currentTime - state.sessionStart : 0;
+  const localLoop = Math.max(0, Math.floor(elapsed / (beatDur * state.grid.patternLength)));
+  const absLoop = state.sessionLoopOffset + localLoop;
+  const fromHits = state.scorer.hits.map((h) => h.loop).concat(state.scorer.missed.map((e) => e.loop));
+  const maxLoop = Math.max(absLoop, ...fromHits, -1);
+  state.nextLoop = maxLoop + 1;
+  setPhase("paused");
+  $("pause").textContent = "Resume";
+  showReview();
+  if (opts.audioSuspend) $("resume").hidden = false;
+}
+
+async function resumeSession() {
+  if (state.phase !== "paused") return;
+  if (state.ctx) await resumeContext(state.ctx);
+  $("resume").hidden = true;
+  hideReview();
+  state.segmentCountIn = 1;
+  state.barsAtSegmentStart = state.barsDone;
+  state.sessionLoopOffset = state.nextLoop;
+  const t0 = state.ctx.currentTime + 0.12;
+  state.sessionStart = t0;
+  state.scheduler.start(
+    state.grid,
+    { ...state.config, countInBars: 1, bpm: state.scheduler.getBpm() },
+    t0,
+    state.scheduler.getBpm() || state.bpm,
+    { loopBase: state.sessionLoopOffset },
+  );
+  setPhase("countIn");
+  $("pause").textContent = "Pause";
+  loop();
+}
+
+function reviewModel() {
+  const bpm = state.scheduler?.getBpm() || state.bpm;
+  return {
+    hits: state.scorer.hits,
+    missed: state.scorer.missed,
+    grid: state.grid,
+    gridStep: 60 / bpm / state.grid.slotsPerBeat,
+    dropoutBars: settings.dropoutBars,
+    dropoutEvery: settings.dropoutEvery,
+    ratio: state.scorer.getRatio(),
+    countInLoops: 0,
+  };
+}
+
+function showReview() {
+  if (!state.grid) return;
+  $("live-layout").hidden = true;
+  $("review-wrap").hidden = false;
+  state.review.setModel(reviewModel());
+}
+
+function hideReview() {
+  $("review-wrap").hidden = true;
+  $("live-layout").hidden = false;
 }
 
 async function persistSession(summary) {
@@ -449,7 +545,7 @@ function onWorklet(ev) {
       centroid: feat.centroid ?? 0,
       hfRatio: feat.hfRatio ?? 0,
     };
-    if (state.phase === "armed") continue;
+    if (state.phase === "armed" || state.phase === "paused") continue;
     const rec = state.scorer.matchOnset(
       onset,
       state.scheduler.expectedEvents,
@@ -489,10 +585,14 @@ function refreshLiveStats() {
   state.lastScores = sum;
   const mic = settings.inputMode === "mic";
   renderFingerBars($("fingers"), state.ema, state.grid.fingers, mic);
-  renderScores($("scores"), sum.scores, sum.diagnosis, mic);
+  renderScores($("scores"), sum.scores, sum.diagnosis, mic, {
+    scoresHeard: sum.scoresHeard,
+    ratio: state.scorer.getRatio(),
+  });
 }
 
 function loop() {
+  if (state.phase === "paused" || state.phase === "ended" || state.phase === "idle") return;
   state.raf = requestAnimationFrame(loop);
   if (!state.ctx || !state.grid) return;
   const now = state.ctx.currentTime;
@@ -501,8 +601,9 @@ function loop() {
   const step = beatDur / state.grid.slotsPerBeat;
   const elapsed = now - state.sessionStart;
   const pos = ((elapsed % beatDur) + beatDur) % beatDur / beatDur;
-  const loopIdx = Math.max(0, Math.floor(elapsed / (beatDur * state.grid.patternLength)));
-  const drop = settings.dropoutBars > 0 && loopIdx % settings.dropoutEvery >= settings.dropoutEvery - settings.dropoutBars;
+  const localLoop = Math.max(0, Math.floor(elapsed / (beatDur * state.grid.patternLength)));
+  const absLoop = state.sessionLoopOffset + localLoop;
+  const drop = settings.dropoutBars > 0 && absLoop % settings.dropoutEvery >= settings.dropoutEvery - settings.dropoutBars;
   state.clock.setDim(drop);
   state.clock.draw(pos, beatDur);
   state.strip.draw(step);
@@ -511,14 +612,14 @@ function loop() {
     state.clock.addMiss(e.slot);
   });
 
-  if (state.phase === "countIn" && loopIdx >= settings.countInBars) setPhase("running");
+  if (state.phase === "countIn" && localLoop >= state.segmentCountIn) setPhase("running");
 
-  state.barsDone = Math.max(0, loopIdx - settings.countInBars);
+  state.barsDone = state.barsAtSegmentStart + Math.max(0, localLoop - state.segmentCountIn);
   $("bars").textContent = `${state.barsDone} bars`;
   $("phase").textContent = state.phase;
   $("bpm-val").textContent = String(Math.round(bpm));
 
-  maybeRamp(loopIdx, now, beatDur);
+  maybeRamp(absLoop, now, beatDur);
 }
 
 function maybeRamp(loopIdx, now, beatDur) {

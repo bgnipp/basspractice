@@ -6,6 +6,27 @@ export function clampScore(value, good, bad) {
   return Math.min(100, Math.max(0, ((bad - value) / (bad - good)) * 100));
 }
 
+export function compressPeak(peak, thresholdDb, ratio) {
+  if (ratio <= 1) return peak;
+  const peakDb = 20 * Math.log10(Math.max(peak, 1e-12));
+  const overDb = Math.max(0, peakDb - thresholdDb);
+  const heardDb = peakDb - overDb * (1 - 1 / ratio);
+  return 10 ** (heardDb / 20);
+}
+
+export function compressionThresholdDb(peaks) {
+  if (peaks.length < 4) return null;
+  const dbs = peaks.map((p) => 20 * Math.log10(Math.max(p, 1e-12))).sort((a, b) => a - b);
+  const mid = dbs.length >> 1;
+  const med = dbs.length % 2 ? dbs[mid] : (dbs[mid - 1] + dbs[mid]) / 2;
+  return med - 6;
+}
+
+export function peakSpreadDb(peaks) {
+  if (!peaks.length) return 0;
+  return 20 * Math.log10(Math.max(...peaks) / (Math.min(...peaks) + 1e-12));
+}
+
 function nearestEvent(events, t, fromIndex) {
   let lo = fromIndex;
   let hi = events.length - 1;
@@ -35,6 +56,21 @@ export function createScorer() {
   const hits = [];
   let sweepIndex = 0;
   let missed = [];
+  let ratio = 1;
+  const peakRing = [];
+  let lastThresholdDb = null;
+
+  function heardFor(peak) {
+    const thr = compressionThresholdDb(peakRing);
+    lastThresholdDb = thr;
+    if (thr == null || ratio <= 1) return peak;
+    return compressPeak(peak, thr, ratio);
+  }
+
+  function pushRing(peak) {
+    peakRing.push(peak);
+    if (peakRing.length > 16) peakRing.shift();
+  }
 
   function matchOnset(onset, events, gridStep, latencyCompMs, sampleRate, now) {
     const t = onset.frame / sampleRate - latencyCompMs / 1000;
@@ -75,6 +111,8 @@ export function createScorer() {
   }
 
   function record(onset, t, e, type, devMs, scored) {
+    const heardPeak = heardFor(onset.peak);
+    if (type === "hit" && scored && !(e && e.slot.accent)) pushRing(onset.peak);
     return {
       t,
       slotIndex: e ? e.slot.index : -1,
@@ -83,6 +121,7 @@ export function createScorer() {
       accent: e ? e.slot.accent : false,
       devMs,
       peak: onset.peak,
+      heardPeak,
       rms: onset.rms,
       centroid: onset.centroid ?? 0,
       hfRatio: onset.hfRatio ?? 0,
@@ -124,12 +163,15 @@ export function createScorer() {
       const dev = g.map((h) => h.devMs);
       const peak = g.map((h) => h.peak);
       const cen = g.map((h) => h.centroid);
+      const heard = g.map((h) => h.heardPeak ?? h.peak);
       out[name] = {
         n: g.length,
         meanDev: mean(dev),
         jitter: std(dev),
         peakMean: mean(peak),
         peakCV: mean(peak) ? std(peak) / mean(peak) : 0,
+        heardPeakMean: mean(heard),
+        heardPeakCV: mean(heard) ? std(heard) / mean(heard) : 0,
         centroidMean: mean(cen),
         centroidCV: mean(cen) ? std(cen) / mean(cen) : 0,
       };
@@ -137,15 +179,18 @@ export function createScorer() {
 
     const present = fingers.filter((k) => out[k]);
     let balance = { peakSpreadDb: 0, centroidSpreadPct: 0, timingSpreadMs: 0 };
+    let balanceHeard = { peakSpreadDb: 0 };
     if (present.length >= 2) {
       const peaks = present.map((k) => out[k].peakMean);
+      const heardPeaks = present.map((k) => out[k].heardPeakMean);
       const cens = present.map((k) => out[k].centroidMean);
       const devs = present.map((k) => out[k].meanDev);
       balance = {
-        peakSpreadDb: 20 * Math.log10(Math.max(...peaks) / (Math.min(...peaks) + 1e-12)),
+        peakSpreadDb: peakSpreadDb(peaks),
         centroidSpreadPct: ((Math.max(...cens) - Math.min(...cens)) / (mean(cens) + 1e-12)) * 100,
         timingSpreadMs: Math.max(...devs) - Math.min(...devs),
       };
+      balanceHeard = { peakSpreadDb: peakSpreadDb(heardPeaks) };
     }
 
     const ghosts = subset.filter((h) => h.type === "ghost").length;
@@ -186,19 +231,29 @@ export function createScorer() {
     };
     if (accentHitRate != null) scores.accent = clampScore(accentHitRate * 100, 90, 40);
 
+    const scoresHeard = {
+      attackEven: clampScore((out.all?.heardPeakCV ?? 0) * 100, 6, 30),
+      fingerBalance: clampScore(balanceHeard.peakSpreadDb, 1.0, 6.0),
+    };
+    const dependence = Math.max(0, scoresHeard.attackEven - scores.attackEven);
+
     const diagnosis = diagnose({
-      scores, balance, out, fingers: present, ghosts, missedN: missedIn, doubles,
-      leakage, cycle, gridStep, slotsPerBeatHint: null,
+      scores, balance, balanceHeard, out, fingers: present, ghosts, missedN: missedIn, doubles,
+      leakage, cycle, gridStep, ratio,
     });
 
     return {
       out,
       balance,
+      balanceHeard,
       scores,
+      scoresHeard,
+      dependence,
       diagnosis,
       cleanliness: { ghosts, missed: missedIn, doubles, extras },
       accentHitRate,
       leakage,
+      compression: { ratio, thresholdDb: lastThresholdDb },
     };
   }
 
@@ -209,10 +264,21 @@ export function createScorer() {
     sweep,
     windowHits,
     summarize,
+    setRatio(r) {
+      ratio = r === 2 || r === 4 || r === 8 ? r : 1;
+    },
+    getRatio() {
+      return ratio;
+    },
+    getThresholdDb() {
+      return lastThresholdDb;
+    },
     reset() {
       hits.length = 0;
       missed.length = 0;
       sweepIndex = 0;
+      peakRing.length = 0;
+      lastThresholdDb = null;
     },
     getSweepIndex() {
       return sweepIndex;
@@ -231,18 +297,28 @@ function std(a) {
   return Math.sqrt(a.reduce((s, v) => s + (v - m) ** 2, 0) / a.length);
 }
 
-export function diagnose({ scores, balance, out, fingers, ghosts, missedN, doubles, leakage, cycle, gridStep }) {
+export function diagnose({ scores, balance, balanceHeard, out, fingers, ghosts, missedN, doubles, leakage, cycle, gridStep, ratio }) {
   const lines = [];
   const fn = (k) => FINGER_NAMES[k] || k;
+  const compressed = (ratio || 1) > 1;
+  if (compressed && ghosts >= 2) {
+    lines.push(`ghosts will be loud through your comp: ${ghosts} in last 8 bars`);
+  }
   if (scores.clean < 60) {
-    if (ghosts > 0) lines.push(`ghost plucks on rests: ${ghosts} in last 8 bars`);
+    if (ghosts > 0 && !(compressed && ghosts >= 2)) lines.push(`ghost plucks on rests: ${ghosts} in last 8 bars`);
     else if (missedN > 0) lines.push(`missed ${missedN} notes`);
     else if (doubles > 0) lines.push(`${doubles} double triggers`);
   }
   if (fingers.length && balance.peakSpreadDb > 2) {
     const quiet = fingers.reduce((a, b) => (out[a].peakMean < out[b].peakMean ? a : b));
-    const rel = 20 * Math.log10((out[quiet].peakMean + 1e-12) / (Math.max(...fingers.map((k) => out[k].peakMean)) + 1e-12));
-    lines.push(`${fn(quiet)} is the weak finger (${rel.toFixed(1)} dB)`);
+    const rawRel = 20 * Math.log10((out[quiet].peakMean + 1e-12) / (Math.max(...fingers.map((k) => out[k].peakMean)) + 1e-12));
+    const heardSpread = balanceHeard?.peakSpreadDb ?? 0;
+    if (compressed && heardSpread < 1) {
+      const heardRel = 20 * Math.log10((out[quiet].heardPeakMean + 1e-12) / (Math.max(...fingers.map((k) => out[k].heardPeakMean)) + 1e-12));
+      lines.push(`${fn(quiet)} is weak raw (${rawRel.toFixed(1)} dB) — your comp hides it (${heardRel.toFixed(1)} dB heard)`);
+    } else {
+      lines.push(`${fn(quiet)} is the weak finger (${rawRel.toFixed(1)} dB)`);
+    }
   }
   if (fingers.length && balance.timingSpreadMs > 0.05 * gridStep * 1000) {
     const late = fingers.reduce((a, b) => (out[a].meanDev > out[b].meanDev ? a : b));
@@ -260,7 +336,7 @@ export function diagnose({ scores, balance, out, fingers, ghosts, missedN, doubl
 }
 
 export function hitsToCsv(hits) {
-  const cols = ["t", "slotIndex", "loop", "finger", "accent", "devMs", "peak", "rms", "centroid", "hfRatio", "type", "scored"];
+  const cols = ["t", "slotIndex", "loop", "finger", "accent", "devMs", "peak", "heardPeak", "rms", "centroid", "hfRatio", "type", "scored"];
   const lines = [cols.join(",")];
   for (const h of hits) {
     lines.push(cols.map((c) => h[c] ?? "").join(","));

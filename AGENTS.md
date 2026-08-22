@@ -14,6 +14,7 @@ A browser app for practicing Les Claypool-style three-finger (ring–middle–in
 | [`ref/rmi_analyzer.py`](ref/rmi_analyzer.py) | Ground-truth DSP. Do not modify without re-validating §12. |
 | [`ref/make_test.py`](ref/make_test.py) | Synthetic test WAV generator. |
 | [`.cursor/rules/pluck-trainer.mdc`](.cursor/rules/pluck-trainer.mdc) | Always-on agent constraints. |
+| [`docs/SPEC-COMPRESSION-REVIEW.md`](docs/SPEC-COMPRESSION-REVIEW.md) | Approved v1.1 spec: compression profile ("heard" scores) + post-pause review grid view. |
 
 ## Reading order (spec §0)
 
@@ -30,6 +31,7 @@ A browser app for practicing Les Claypool-style three-finger (ring–middle–in
 - [x] Spec persisted; `ref/` created verbatim
 - [x] Spec reviewed and amended (2026-08-22): §12 validation now median-offset-corrected; dev analyze-file preprocessing specified; channel-0 input; HTTPS requirement; M0 exit criteria; `cycle` metadata for leakage
 - [x] **M0–M5 implemented** (2026-08-22) — vanilla static app in `index.html` + `src/`. iPad/M0 hardware exit (`track.getSettings()`, AGC, iRig select) still needs a real device. M2 WAV harness is at `?dev=analyze`.
+- [x] **Compression profile + review grid** (2026-08-22) — `docs/SPEC-COMPRESSION-REVIEW.md`. Settings ratio off/2:1/4:1/8:1; raw→heard scores; pause opens wrap-view timeline.
 - [ ] **M0 device check** — confirm voice processing off on iPad + iRig
 - [ ] **M2 WAV check** — `test_bad_ring.wav` vs `rmi_analyzer.py --csv` in `?dev=analyze`
 

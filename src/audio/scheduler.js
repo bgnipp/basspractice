@@ -17,6 +17,7 @@ export function createScheduler(ctx) {
   let ticksOn = true;
   const expectedEvents = [];
   let audible = true;
+  let loopBase = 0;
 
   function beatDur() {
     return 60 / currentBpm;
@@ -44,10 +45,11 @@ export function createScheduler(ctx) {
     while (guard++ < 64) {
       const t = eventTime(nextSlotCursor);
       if (t > horizon) break;
-      const loop = Math.floor(nextSlotCursor / slotsPerLoop);
+      const localLoop = Math.floor(nextSlotCursor / slotsPerLoop);
+      const loop = localLoop + loopBase;
       const slot = grid.slots[nextSlotCursor % slotsPerLoop];
       const beatAbs = loop * grid.patternLength + slot.beat;
-      const inCountIn = loop < (config.countInBars || 0);
+      const inCountIn = localLoop < (config.countInBars || 0);
       const drop = isDropout(loop);
       const evAudible = audible && !drop;
       const ev = {
@@ -83,13 +85,14 @@ export function createScheduler(ctx) {
 
   return {
     expectedEvents,
-    start(nextGrid, nextConfig, startTime, bpm) {
+    start(nextGrid, nextConfig, startTime, bpm, opts = {}) {
       grid = nextGrid;
       config = nextConfig;
       sessionStart = startTime;
       rampBoundary = startTime;
       currentBpm = bpm;
       nextSlotCursor = 0;
+      loopBase = opts.loopBase || 0;
       expectedEvents.length = 0;
       audible = true;
       this.stopWake();
@@ -100,6 +103,19 @@ export function createScheduler(ctx) {
       const dts = [];
       for (let i = 1; i < clicks.length; i++) dts.push(Number((clicks[i] - clicks[i - 1]).toFixed(10)));
       console.log("[pluck] M1 beat spacing (should equal 60/bpm)", dts[0], "bpm", currentBpm, "unique", [...new Set(dts)]);
+    },
+    pause() {
+      this.stopWake();
+      const now = ctx.currentTime;
+      while (expectedEvents.length) {
+        const last = expectedEvents[expectedEvents.length - 1];
+        if (last.time > now) {
+          expectedEvents.pop();
+          nextSlotCursor = last.absSlot;
+        } else {
+          break;
+        }
+      }
     },
     stopWake() {
       if (timer) {

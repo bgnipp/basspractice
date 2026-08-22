@@ -19,6 +19,7 @@ Read `docs/PLUCK-TRAINER.md` Part A in the order in §0, then the **Appendix** (
 - Centroid/FFT on the main thread from a posted 40 ms buffer (v1).
 - Beat clock shows one beat; pattern-ring view is M4+.
 - Web app for v1, not native iOS. If M0's constraint check fails (iOS won't disable voice processing on the interface input), fall back to Capacitor + native audio-input plugin feeding the same JS worklet. Full Swift is the v2 path (Watch haptics).
+- Compression profile and review grid: `docs/SPEC-COMPRESSION-REVIEW.md`. Heard scores are dB-domain math on existing peaks — do not put a compressor in the audio path. Ramp gating stays on raw attackEven.
 
 ## Hard constraints
 
