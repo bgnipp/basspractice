@@ -43,6 +43,8 @@
     #warn { background: #3b1515; color: #fecaca; padding: 8px 12px; border-radius: 10px; margin-top: 8px; }
     .clock-wrap { display: flex; justify-content: center; margin: 12px 0; }
     #clock { width: min(72vw, 560px); height: min(72vw, 560px); background: var(--panel); border-radius: 16px; }
+    #highway { width: 100%; height: 220px; display: block; background: var(--panel); border-radius: 12px 12px 0 0; }
+    .highway-cap { font-size: 11px; color: var(--muted); background: var(--panel); border-radius: 0 0 12px 12px; padding: 4px 10px 8px; margin-bottom: 8px; }
     #strip { width: 100%; height: 120px; display: block; background: var(--panel); border-radius: 12px; }
     #fingers { display: grid; gap: 8px; margin-top: 12px; }
     .fbar { display: grid; grid-template-columns: 72px 1fr 1fr 1fr; gap: 8px; align-items: center; }
@@ -52,6 +54,7 @@
     .track:not(.center) b { width: 40%; }
     .track.center b { width: 8px; margin-left: -4px; }
     #scores { margin-top: 12px; }
+    .tally-chips { font-size: 12px; color: var(--muted); margin: 8px 0 0; }
     .score { display: grid; grid-template-columns: 110px 1fr 36px; gap: 8px; align-items: center; margin: 6px 0; }
     .score .track b { position: relative; display: block; height: 10px; background: var(--green); }
     .score .track .heard-mark { position: absolute; top: -2px; bottom: -2px; width: 3px; margin-left: -1px; background: rgba(232,228,217,.7); border-radius: 2px; }
@@ -82,7 +85,13 @@
     .review-head, .review-body { display: block; width: 100%; }
     .review-scroll { position: relative; height: min(52vh, 420px); overflow-y: auto; }
     .review-body { position: sticky; top: 0; pointer-events: auto; }
-    .review-readout { min-height: 1.4em; font-size: 13px; color: var(--muted); margin-top: 6px; }
+    .review-readout { min-height: 1.4em; font-size: 13px; color: var(--muted); margin-top: 6px; display: flex; gap: 8px; align-items: center; }
+    .review-toolbar { display: flex; gap: 8px; align-items: center; margin-bottom: 6px; }
+    .seq-row { display: flex; gap: 6px; align-items: center; margin: 6px 0; }
+    .seq-row select { flex: 1; }
+    .seq-row input { width: 64px; }
+    .heatmap-metrics { display: flex; gap: 6px; flex-wrap: wrap; margin: 8px 0; }
+    #heatmap { width: 100%; display: block; background: var(--panel); }
     @media (orientation: landscape) and (min-width: 800px) {
       .layout { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; align-items: start; }
       #clock { width: min(46vw, 520px); height: min(46vw, 520px); }
@@ -124,22 +133,32 @@
     <div class="layout" id="live-layout">
       <div class="clock-wrap"><canvas id="clock"></canvas></div>
       <div>
+        <canvas id="highway"></canvas>
+        <div class="highway-cap">upcoming ↓ toward now · after the line: ← early · late → · green / yellow / red</div>
         <canvas id="strip"></canvas>
         <div id="fingers"></div>
         <div id="scores"></div>
       </div>
     </div>
     <div id="review-wrap" hidden>
+      <div class="review-toolbar">
+        <button id="replay-last8">Replay last 8 bars</button>
+        <span id="replay-status" class="badge"></span>
+      </div>
       <canvas class="review-head"></canvas>
       <div class="review-scroll">
         <canvas class="review-body"></canvas>
         <div class="review-spacer"></div>
       </div>
-      <div class="review-readout"></div>
+      <div class="review-readout">
+        <button id="replay-row" disabled>▶</button>
+        <span class="review-readout-text"></span>
+      </div>
     </div>
     <div class="footer">
       <span id="phase">idle</span>
       <span id="bars">0 bars</span>
+      <span id="seq-stat"></span>
       <span id="ramp-stat"></span>
       <button id="end">End session</button>
     </div>
@@ -150,7 +169,18 @@
     <div class="sheet">
       <h2>Patterns</h2>
       <div id="picker-list"></div>
-      <h3>New custom</h3>
+      <h2>Sequences</h2>
+      <div id="seq-list"></div>
+      <h3>New sequence</h3>
+      <input id="seq-name" placeholder="Name">
+      <div id="seq-rows"></div>
+      <button id="seq-add-row" type="button">Add segment</button>
+      <label><input id="seq-loop" type="checkbox" checked> Loop sequence</label>
+      <label><input id="seq-shuffle" type="checkbox"> Shuffle (reading)</label>
+      <label><input id="seq-gate" type="checkbox"> Gate (repeat until clean)</label>
+      <label>Gate clean min <input id="seq-gate-min" type="number" min="0" max="100" value="80"></label>
+      <button id="save-seq" class="primary">Save sequence</button>
+      <h3>New custom pattern</h3>
       <input id="custom-name" placeholder="Name">
       <input id="custom-pat" placeholder="rmi rmi rmi rmi">
       <div id="custom-preview" class="pat-dots"></div>
@@ -208,6 +238,18 @@
     <div class="sheet">
       <h2>History</h2>
       <canvas id="hist-chart" style="width:100%;height:140px"></canvas>
+      <div id="heatmap-wrap">
+        <div id="heatmap-pats"></div>
+        <p id="heatmap-callout" class="diag"></p>
+        <div id="heatmap-metrics" class="heatmap-metrics">
+          <button type="button" data-metric="meanDev">|meanDev|</button>
+          <button type="button" data-metric="jitter">jitter</button>
+          <button type="button" data-metric="missRate">missRate</button>
+          <button type="button" data-metric="ghostRate">ghostRate</button>
+        </div>
+        <canvas id="heatmap"></canvas>
+        <div id="heatmap-readout" class="badge"></div>
+      </div>
       <div id="hist-list"></div>
       <button data-close="history">Close</button>
     </div>

@@ -18,6 +18,7 @@ export function createScheduler(ctx) {
   const expectedEvents = [];
   let audible = true;
   let loopBase = 0;
+  let segmentIndex = 0;
 
   function beatDur() {
     return 60 / currentBpm;
@@ -63,6 +64,8 @@ export function createScheduler(ctx) {
         doubles: 0,
         scored: !inCountIn,
         absSlot: nextSlotCursor,
+        segmentIndex,
+        pattern: grid.pattern,
       };
       expectedEvents.push(ev);
       if (evAudible) {
@@ -93,6 +96,7 @@ export function createScheduler(ctx) {
       currentBpm = bpm;
       nextSlotCursor = 0;
       loopBase = opts.loopBase || 0;
+      segmentIndex = opts.segmentIndex || 0;
       expectedEvents.length = 0;
       audible = true;
       this.stopWake();
@@ -152,8 +156,42 @@ export function createScheduler(ctx) {
     getBpm() {
       return currentBpm;
     },
+    setGridAt(nextGrid, boundaryTime, opts = {}) {
+      if (!grid) {
+        grid = nextGrid;
+        sessionStart = boundaryTime;
+        nextSlotCursor = 0;
+        if (opts.loopBase != null) loopBase = opts.loopBase;
+        if (opts.segmentIndex != null) segmentIndex = opts.segmentIndex;
+        if (opts.groove && config) config.groove = opts.groove;
+        if (config) config.countInBars = 0;
+        return;
+      }
+      while (expectedEvents.length) {
+        const last = expectedEvents[expectedEvents.length - 1];
+        if (last.time >= boundaryTime) {
+          expectedEvents.pop();
+          nextSlotCursor = last.absSlot;
+        } else {
+          break;
+        }
+      }
+      grid = nextGrid;
+      nextSlotCursor = 0;
+      sessionStart = boundaryTime;
+      if (opts.loopBase != null) loopBase = opts.loopBase;
+      if (opts.segmentIndex != null) segmentIndex = opts.segmentIndex;
+      if (opts.groove && config) config.groove = opts.groove;
+      if (config) config.countInBars = 0;
+    },
+    getKit() {
+      return kit;
+    },
     getGrid() {
       return grid;
+    },
+    getSegmentIndex() {
+      return segmentIndex;
     },
     sessionStart() {
       return sessionStart;

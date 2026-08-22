@@ -36,7 +36,13 @@ export function renderScores(el, scores, diagnosis, micMode, extra = {}) {
       </div>
       <em>${hv != null ? `${v.toFixed(0)} → ${hv.toFixed(0)}` : v.toFixed(0)}</em>
     </div>`;
-  }).join("") + `<p class="diag">${(diagnosis || []).join(" · ")}</p>`;
+  }).join("") + `<p class="diag">${(diagnosis || []).join(" · ")}</p>`
+    + (extra.tallies ? renderTallyChips(extra.tallies) : "");
+}
+
+export function renderTallyChips(t) {
+  if (!t) return "";
+  return `<p class="tally-chips">● ${t.perfect || 0} perfect · ${t.good || 0} good · ${t.off || 0} off · ${t.missed || 0} miss${t.ghosts ? ` · ${t.ghosts} ghost` : ""}${t.doubles ? ` · ${t.doubles} double` : ""}</p>`;
 }
 
 export function renderPickerList(el, presets, custom, currentId, onPick) {
@@ -62,6 +68,28 @@ export function renderPickerList(el, presets, custom, currentId, onPick) {
   });
 }
 
+export function renderSequenceList(el, presets, custom, currentId, onPick) {
+  const rows = [
+    ...presets.map((s) => ({ ...s, custom: false })),
+    ...custom.map((s) => ({ ...s, custom: true })),
+  ];
+  el.innerHTML = rows.map((s) => `
+    <button class="picker-row ${s.id === currentId ? "on" : ""}" data-id="${s.id}">
+      <div>
+        <strong>${esc(s.name)}</strong>
+        <small>${s.custom ? "custom" : s.shuffle ? "shuffle" : `${s.segments.length} segments`}</small>
+      </div>
+      <div class="pat-dots">${s.segments.map((seg) => `<span class="beat">${esc(seg.id || seg.pattern || "")}</span>`).join(" → ")}</div>
+    </button>
+  `).join("");
+  el.querySelectorAll(".picker-row").forEach((btn) => {
+    btn.onclick = () => {
+      const s = rows.find((r) => r.id === btn.dataset.id);
+      onPick(s);
+    };
+  });
+}
+
 export function renderDots(pattern) {
   return pattern.split(/\s+/).map((beat) => {
     const cells = [...beat].map((ch) => {
@@ -72,6 +100,55 @@ export function renderDots(pattern) {
     }).join("");
     return `<span class="beat">${cells}</span>`;
   }).join("");
+}
+
+export function addSequenceRow(container, catalog, presetId, bars) {
+  const row = document.createElement("div");
+  row.className = "seq-row";
+  const sel = document.createElement("select");
+  catalog.forEach((p) => {
+    const o = document.createElement("option");
+    o.value = p.id;
+    o.textContent = p.name;
+    sel.appendChild(o);
+  });
+  sel.value = presetId || catalog[0]?.id || "";
+  const barsIn = document.createElement("input");
+  barsIn.type = "number";
+  barsIn.min = "1";
+  barsIn.max = "32";
+  barsIn.value = String(bars || 4);
+  const up = document.createElement("button");
+  up.type = "button";
+  up.textContent = "↑";
+  up.onclick = () => {
+    if (row.previousElementSibling) container.insertBefore(row, row.previousElementSibling);
+  };
+  const down = document.createElement("button");
+  down.type = "button";
+  down.textContent = "↓";
+  down.onclick = () => {
+    if (row.nextElementSibling) container.insertBefore(row.nextElementSibling, row);
+  };
+  const del = document.createElement("button");
+  del.type = "button";
+  del.textContent = "✕";
+  del.onclick = () => row.remove();
+  row.append(sel, barsIn, up, down, del);
+  container.appendChild(row);
+}
+
+export function readSequenceForm(nameEl, rowsEl, extras) {
+  const segments = [...rowsEl.querySelectorAll(".seq-row")].map((row) => {
+    const id = row.querySelector("select").value;
+    const bars = +row.querySelector("input").value || 1;
+    return { id, bars };
+  });
+  return {
+    name: (nameEl.value || "").trim() || "Custom sequence",
+    segments,
+    extras,
+  };
 }
 
 export function bindCustomEditor(input, preview, status, onValid) {
@@ -121,9 +198,35 @@ export function renderSummary(el, summary, config) {
       }).join(" · ")}
     </p>
     ${compLine(summary)}
+    ${summary.bestStreak != null ? `<p>best streak ×${summary.bestStreak}${summary.tallies ? " · " + `${summary.tallies.perfect} perfect / ${summary.tallies.good} good` : ""}</p>` : ""}
+    ${segmentTable(summary)}
     <p class="diag">${diagnosis.join(" · ")}</p>
     <div class="hists"></div>
   `;
+}
+
+function segmentTable(summary) {
+  const rows = summary.perSegment;
+  if (!rows?.length) return "";
+  const tr = rows.map((s) => `
+    <tr>
+      <td>${esc(s.name || s.pattern)}</td>
+      <td>${s.n}</td>
+      <td>${s.timing.toFixed(0)}</td>
+      <td>${s.clean.toFixed(0)}</td>
+      <td>${s.attackEven.toFixed(0)}</td>
+    </tr>`).join("");
+  const tj = summary.transition;
+  const trans = tj
+    ? `<p>transition jitter ${tj.firstBarJitter.toFixed(1)} ms vs steady ${tj.steadyJitter.toFixed(1)} ms</p>`
+    : "";
+  return `
+    <h3>Per segment</h3>
+    <table>
+      <thead><tr><th>pattern</th><th>n</th><th>timing</th><th>clean</th><th>attack</th></tr></thead>
+      <tbody>${tr}</tbody>
+    </table>
+    ${trans}`;
 }
 
 function compLine(summary) {
@@ -145,7 +248,7 @@ export function renderHistory(el, sessions, onOpen) {
     return `<button class="hist-row" data-id="${s.id}">
       <strong>${d.toLocaleString()}</strong>
       <span>${esc(s.config?.pattern || "")} @ ${s.config?.bpm}</span>
-      <em>T ${fmt(sc.timing)} · A ${fmt(sc.attackEven)} · C ${fmt(sc.clean)}</em>
+      <em>T ${fmt(sc.timing)} · A ${fmt(sc.attackEven)} · C ${fmt(sc.clean)}${s.summary?.bestStreak ? ` · ×${s.summary.bestStreak}` : ""}</em>`
     </button>`;
   }).join("");
   el.querySelectorAll(".hist-row").forEach((b) => {

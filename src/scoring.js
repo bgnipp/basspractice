@@ -27,6 +27,223 @@ export function peakSpreadDb(peaks) {
   return 20 * Math.log10(Math.max(...peaks) / (Math.min(...peaks) + 1e-12));
 }
 
+/** Highway / streak bands: |dev| vs 4% and 12% of grid step. */
+export function grade(devMs, gridStep) {
+  const rel = Math.abs(devMs) / (gridStep * 1000);
+  if (rel <= 0.04) return "perfect";
+  if (rel <= 0.12) return "good";
+  return "off";
+}
+
+export function emptyTallies() {
+  return { perfect: 0, good: 0, off: 0, missed: 0, ghosts: 0, doubles: 0 };
+}
+
+export function createStreakState() {
+  return { streak: 0, bestStreak: 0, lastBreak: "", tallies: emptyTallies() };
+}
+
+/**
+ * Streak reducer. Count-in (scored=false) is ignored. extra does not reset.
+ * missed/ghost/double/off reset to 0. perfect/good increment.
+ */
+export function applyStreakEvent(state, ev) {
+  const next = {
+    streak: state.streak,
+    bestStreak: state.bestStreak,
+    lastBreak: state.lastBreak,
+    tallies: { ...state.tallies },
+  };
+  if (ev.type === "extra") return next;
+  if (ev.scored === false) return next;
+  if (ev.type === "hit") {
+    const g = ev.grade || grade(ev.devMs, ev.gridStep);
+    next.tallies[g] += 1;
+    if (g === "perfect" || g === "good") {
+      next.streak += 1;
+      if (next.streak > next.bestStreak) next.bestStreak = next.streak;
+      next.lastBreak = "";
+    } else {
+      next.streak = 0;
+      next.lastBreak = "off";
+    }
+    return next;
+  }
+  if (ev.type === "ghost") {
+    next.tallies.ghosts += 1;
+    next.streak = 0;
+    next.lastBreak = "ghost";
+    return next;
+  }
+  if (ev.type === "double") {
+    next.tallies.doubles += 1;
+    next.streak = 0;
+    next.lastBreak = "double";
+    return next;
+  }
+  if (ev.type === "missed") {
+    next.tallies.missed += 1;
+    next.streak = 0;
+    next.lastBreak = "missed";
+    return next;
+  }
+  return next;
+}
+
+export function talliesOf(hits, missedN, gridStep) {
+  const t = emptyTallies();
+  for (const h of hits) {
+    if (!h.scored) continue;
+    if (h.type === "hit") t[grade(h.devMs, gridStep)] += 1;
+    else if (h.type === "ghost") t.ghosts += 1;
+    else if (h.type === "double") t.doubles += 1;
+  }
+  t.missed = missedN || 0;
+  return t;
+}
+
+export function aggregatePerSlot(hits, missed, slots) {
+  return (slots || []).map((slot, i) => {
+    const slotHits = hits.filter((h) => h.type === "hit" && h.scored && h.slotIndex === i);
+    const slotMiss = (missed || []).filter((e) => (e.slot?.index ?? e.slotIndex) === i);
+    const ghosts = hits.filter((h) => h.type === "ghost" && h.scored && h.slotIndex === i);
+    const n = slotHits.length;
+    const devs = slotHits.map((h) => h.devMs);
+    const peaks = slotHits.map((h) => h.peak);
+    const denom = n + slotMiss.length;
+    const ghostDenom = n + ghosts.length + slotMiss.length;
+    return {
+      n,
+      meanDev: n ? mean(devs) : 0,
+      jitter: n >= 2 ? std(devs) : 0,
+      missRate: denom ? slotMiss.length / denom : 0,
+      ghostRate: ghostDenom ? ghosts.length / ghostDenom : 0,
+      peakMean: n ? mean(peaks) : 0,
+    };
+  });
+}
+
+export function mergePerSlot(rows) {
+  if (!rows?.length) return [];
+  const n = Math.max(...rows.map((r) => r.length));
+  const out = [];
+  for (let i = 0; i < n; i++) {
+    let nHits = 0;
+    let wDev = 0;
+    let wJit = 0;
+    let wPeak = 0;
+    let missN = 0;
+    let missD = 0;
+    let ghostN = 0;
+    let ghostD = 0;
+    for (const row of rows) {
+      const c = row[i];
+      if (!c) continue;
+      nHits += c.n || 0;
+      wDev += (c.meanDev || 0) * (c.n || 0);
+      wJit += (c.jitter || 0) * (c.n || 0);
+      wPeak += (c.peakMean || 0) * (c.n || 0);
+      const d = (c.n || 0) / Math.max(1e-12, 1 - (c.missRate || 0));
+      const misses = (c.missRate || 0) * d;
+      missN += misses;
+      missD += d;
+      const gd = (c.n || 0) / Math.max(1e-12, 1 - (c.ghostRate || 0));
+      ghostN += (c.ghostRate || 0) * gd;
+      ghostD += gd;
+    }
+    out.push({
+      n: nHits,
+      meanDev: nHits ? wDev / nHits : 0,
+      jitter: nHits ? wJit / nHits : 0,
+      missRate: missD ? missN / missD : 0,
+      ghostRate: ghostD ? ghostN / ghostD : 0,
+      peakMean: nHits ? wPeak / nHits : 0,
+    });
+  }
+  return out;
+}
+
+export function problemSlot(perSlot, slots) {
+  let best = null;
+  (slots || []).forEach((slot, i) => {
+    if (!slot?.finger) return;
+    const cell = perSlot[i];
+    if (!cell) return;
+    const score = (cell.missRate || 0) * 100 + Math.abs(cell.meanDev || 0) + (cell.jitter || 0);
+    if (!best || score > best.score) best = { index: i, slot, cell, score };
+  });
+  return best;
+}
+
+export function perSlotByPattern(hits, missed, patternSlots) {
+  const out = {};
+  for (const [pattern, slots] of Object.entries(patternSlots || {})) {
+    const hs = hits.filter((h) => h.pattern === pattern);
+    const ms = (missed || []).filter((e) => e.pattern === pattern);
+    out[pattern] = aggregatePerSlot(hs, ms, slots);
+  }
+  return out;
+}
+
+export function segmentStats(hits, missed, gridStep) {
+  const played = hits.filter((h) => h.type === "hit" && h.scored);
+  const ghosts = hits.filter((h) => h.type === "ghost" && h.scored).length;
+  const doubles = hits.filter((h) => h.type === "double" && h.scored).length;
+  const missedN = (missed || []).length;
+  const slots = Math.max(1, played.length + missedN);
+  const dirtyPct = ((ghosts + missedN + doubles) / slots) * 100;
+  const jitter = std(played.map((h) => h.devMs));
+  const peak = played.map((h) => h.peak);
+  const pm = mean(peak);
+  const peakCV = pm ? std(peak) / pm : 0;
+  return {
+    n: played.length,
+    timing: clampScore(jitter, 0.04 * gridStep * 1000, 0.25 * gridStep * 1000),
+    attackEven: clampScore(peakCV * 100, 6, 30),
+    clean: clampScore(dirtyPct, 0, 15),
+    jitter,
+  };
+}
+
+export function summarizeSegments(hits, missed, sequence, gridStepOf) {
+  if (!sequence?.segments?.length) return { perSegment: [], transition: null };
+  const perSegment = [];
+  const seen = new Set();
+  for (const seg of sequence.segments) {
+    if (seen.has(seg.pattern)) continue;
+    seen.add(seg.pattern);
+    const hs = hits.filter((h) => h.pattern === seg.pattern);
+    const ms = (missed || []).filter((e) => e.pattern === seg.pattern);
+    const step = typeof gridStepOf === "function" ? gridStepOf(seg) : gridStepOf || 0.25;
+    const stats = segmentStats(hs, ms, step);
+    perSegment.push({
+      pattern: seg.pattern,
+      name: seg.name || seg.id || seg.pattern,
+      ...stats,
+    });
+  }
+  return { perSegment, transition: transitionJitter(hits) };
+}
+
+function transitionJitter(hits) {
+  const played = hits.filter((h) => h.type === "hit" && h.scored && h.segmentIndex != null).slice().sort((a, b) => a.t - b.t);
+  if (played.length < 4) return null;
+  const first = [];
+  const rest = [];
+  let lastSeg = null;
+  const firstLoop = new Set();
+  for (const h of played) {
+    if (h.segmentIndex !== lastSeg) {
+      firstLoop.add(`${h.segmentIndex}:${h.loop}`);
+      lastSeg = h.segmentIndex;
+    }
+    if (firstLoop.has(`${h.segmentIndex}:${h.loop}`)) first.push(h.devMs);
+    else rest.push(h.devMs);
+  }
+  if (first.length < 2 || rest.length < 2) return null;
+  return { firstBarJitter: std(first), steadyJitter: std(rest) };
+}
+
 function nearestEvent(events, t, fromIndex) {
   let lo = fromIndex;
   let hi = events.length - 1;
@@ -59,6 +276,7 @@ export function createScorer() {
   let ratio = 1;
   const peakRing = [];
   let lastThresholdDb = null;
+  let streak = createStreakState();
 
   function heardFor(peak) {
     const thr = compressionThresholdDb(peakRing);
@@ -95,17 +313,21 @@ export function createScorer() {
     if (e.slot.finger == null) {
       e.ghosts += 1;
       const rec = record(onset, t, e, "ghost", dev * 1000, e.scored);
+      streak = applyStreakEvent(streak, { type: "ghost", scored: rec.scored });
       hits.push(rec);
       return rec;
     }
     if (e.hit) {
       e.doubles += 1;
       const rec = record(onset, t, e, "double", dev * 1000, e.scored);
+      streak = applyStreakEvent(streak, { type: "double", scored: rec.scored });
       hits.push(rec);
       return rec;
     }
     e.hit = true;
     const rec = record(onset, t, e, "hit", dev * 1000, e.scored);
+    rec.grade = rec.scored ? grade(rec.devMs, gridStep) : null;
+    streak = applyStreakEvent(streak, { type: "hit", scored: rec.scored, devMs: rec.devMs, gridStep, grade: rec.grade });
     hits.push(rec);
     return rec;
   }
@@ -129,6 +351,8 @@ export function createScorer() {
       scored: !!scored,
       slot: e ? e.slot : null,
       event: e,
+      segmentIndex: e && e.segmentIndex != null ? e.segmentIndex : 0,
+      pattern: e && e.pattern != null ? e.pattern : null,
     };
   }
 
@@ -140,6 +364,7 @@ export function createScorer() {
       const e = events[sweepIndex];
       if (e.slot.finger && !e.hit && e.scored) {
         missed.push(e);
+        streak = applyStreakEvent(streak, { type: "missed", scored: true });
         onMiss?.(e);
       }
       sweepIndex++;
@@ -254,6 +479,9 @@ export function createScorer() {
       accentHitRate,
       leakage,
       compression: { ratio, thresholdDb: lastThresholdDb },
+      tallies: talliesOf(subset, missedIn, gridStep),
+      bestStreak: streak.bestStreak,
+      streak: streak.streak,
     };
   }
 
@@ -273,12 +501,16 @@ export function createScorer() {
     getThresholdDb() {
       return lastThresholdDb;
     },
+    getStreak() {
+      return streak;
+    },
     reset() {
       hits.length = 0;
       missed.length = 0;
       sweepIndex = 0;
       peakRing.length = 0;
       lastThresholdDb = null;
+      streak = createStreakState();
     },
     getSweepIndex() {
       return sweepIndex;
@@ -336,7 +568,7 @@ export function diagnose({ scores, balance, balanceHeard, out, fingers, ghosts, 
 }
 
 export function hitsToCsv(hits) {
-  const cols = ["t", "slotIndex", "loop", "finger", "accent", "devMs", "peak", "heardPeak", "rms", "centroid", "hfRatio", "type", "scored"];
+  const cols = ["t", "slotIndex", "loop", "finger", "accent", "devMs", "peak", "heardPeak", "rms", "centroid", "hfRatio", "type", "scored", "segmentIndex", "grade"];
   const lines = [cols.join(",")];
   for (const h of hits) {
     lines.push(cols.map((c) => h[c] ?? "").join(","));

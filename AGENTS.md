@@ -15,6 +15,7 @@ A browser app for practicing Les Claypool-style three-finger (ring–middle–in
 | [`ref/make_test.py`](ref/make_test.py) | Synthetic test WAV generator. |
 | [`.cursor/rules/pluck-trainer.mdc`](.cursor/rules/pluck-trainer.mdc) | Always-on agent constraints. |
 | [`docs/SPEC-COMPRESSION-REVIEW.md`](docs/SPEC-COMPRESSION-REVIEW.md) | Approved v1.1 spec: compression profile ("heard" scores) + post-pause review grid view. |
+| [`docs/SPEC-V1.2-FEATURES.md`](docs/SPEC-V1.2-FEATURES.md) | Approved v1.2 plan: sequence/etude mode, streaks & tallies, take replay, per-slot history heatmap. Build order §2→§1→§3→§4. |
 
 ## Reading order (spec §0)
 
@@ -32,6 +33,8 @@ A browser app for practicing Les Claypool-style three-finger (ring–middle–in
 - [x] Spec reviewed and amended (2026-08-22): §12 validation now median-offset-corrected; dev analyze-file preprocessing specified; channel-0 input; HTTPS requirement; M0 exit criteria; `cycle` metadata for leakage
 - [x] **M0–M5 implemented** (2026-08-22) — vanilla static app in `index.html` + `src/`. iPad/M0 hardware exit (`track.getSettings()`, AGC, iRig select) still needs a real device. M2 WAV harness is at `?dev=analyze`.
 - [x] **Compression profile + review grid** (2026-08-22) — `docs/SPEC-COMPRESSION-REVIEW.md`. Settings ratio off/2:1/4:1/8:1; raw→heard scores; pause opens wrap-view timeline.
+- [x] **Live highway** (2026-08-22) — Guitar Hero–style scrolling grid (`src/ui/highway.js`): upcoming gems approach a now line; after passing, left/right = early/late, green/yellow/red = |dev| vs 4%/12% of grid step.
+- [x] **v1.2 features** (2026-08-22) — `docs/SPEC-V1.2-FEATURES.md`: streaks & tallies, sequence/etude mode (`setGridAt`), take replay (30 s ring), per-slot history heatmap. Tests: `tests/streak.test.mjs`, `tests/sequence.test.mjs`, `tests/heatmap.test.mjs`, `tests/replay.test.mjs`.
 - [ ] **M0 device check** — confirm voice processing off on iPad + iRig
 - [ ] **M2 WAV check** — `test_bad_ring.wav` vs `rmi_analyzer.py --csv` in `?dev=analyze`
 

@@ -4,18 +4,25 @@ import {
 } from "./audio/context.js";
 import { attackFeatures, dbfs } from "./audio/dsp.js";
 import { createScheduler } from "./audio/scheduler.js";
-import { deriveSlots, parsePattern, PRESETS, FINGER_COLORS } from "./pattern.js";
-import { createScorer, hitsToCsv } from "./scoring.js";
+import { playBuf } from "./audio/synth.js";
+import { createTakeRing, framesForRange } from "./audio/ring.js";
+import { deriveSlots, parsePattern, PRESETS, SEQUENCE_PRESETS, FINGER_COLORS, hydrateSequence, validateSequence, findPattern } from "./pattern.js";
+import { pickNextSegmentIndex, segmentBoundary } from "./sequence.js";
+import { createScorer, hitsToCsv, aggregatePerSlot, perSlotByPattern, summarizeSegments } from "./scoring.js";
 import {
   saveSession, listSessions, loadCustomPatterns, saveCustomPattern,
   loadCalibration, saveCalibration, loadSettings, saveSettings,
+  loadCustomSequences, saveCustomSequence,
 } from "./store.js";
 import { createClock } from "./ui/clock.js";
 import { createStrip } from "./ui/strip.js";
+import { createHighway } from "./ui/highway.js";
 import { createReview } from "./ui/review.js";
+import { createHeatmap, heatmapModel } from "./ui/heatmap.js";
 import {
   renderFingerBars, renderScores, renderPickerList, bindCustomEditor,
   renderSummary, renderHistory, renderHistoryChart, renderDots,
+  renderSequenceList, addSequenceRow, readSequenceForm,
 } from "./ui/panels.js";
 
 const $ = (id) => document.getElementById(id);
@@ -69,6 +76,18 @@ const state = {
   segmentCountIn: 1,
   nextLoop: 0,
   review: null,
+  heatmap: null,
+  mode: settings.sequenceId ? "sequence" : "pattern",
+  sequenceId: settings.sequenceId || null,
+  sequence: null,
+  segmentIndex: 0,
+  segmentStart: 0,
+  pendingSwitch: null,
+  gateNote: "",
+  takeRing: null,
+  streakPulse: 0,
+  replayTimer: 0,
+  replayRange: null,
 };
 
 if (new URLSearchParams(location.search).get("dev") === "analyze") {
@@ -81,9 +100,16 @@ if (new URLSearchParams(location.search).get("dev") === "analyze") {
 function boot() {
   const clock = createClock($("clock"));
   const strip = createStrip($("strip"));
+  const highway = createHighway($("highway"));
   state.clock = clock;
   state.strip = strip;
+  state.highway = highway;
   state.review = createReview($("review-wrap"));
+  state.heatmap = createHeatmap($("heatmap"));
+  if (state.sequenceId) {
+    const seq = [...SEQUENCE_PRESETS, ...loadCustomSequences()].find((s) => s.id === state.sequenceId);
+    if (seq) state.sequence = hydrateSequence(seq, loadCustomPatterns());
+  }
 
   bindTransport();
   bindModals();
@@ -93,9 +119,12 @@ function boot() {
   updateMeter(0, 0);
   clock.resize();
   strip.resize();
+  highway.resize();
   window.addEventListener("resize", () => {
     clock.resize();
     strip.resize();
+    highway.resize();
+    state.heatmap?.resize();
   });
 
   document.addEventListener("visibilitychange", onVisibility);
@@ -163,13 +192,73 @@ function bindModals() {
     closeModal("summary");
     showReview();
   };
+  bindSequenceUi();
+  $("replay-last8").onclick = () => replayLastBars(8);
+  $("replay-row").onclick = () => {
+    const sel = state.review.getSelected();
+    if (sel) replayLoop(sel);
+  };
+  state.review.setOnSelect((sel) => {
+    $("replay-row").disabled = !canReplaySelection(sel);
+  });
+  document.querySelectorAll("#heatmap-metrics [data-metric]").forEach((b) => {
+    b.onclick = () => {
+      state.heatmap.setMetric(b.dataset.metric);
+      $("heatmap-readout").textContent = state.heatmap.getReadout();
+    };
+  });
+}
+
+function bindSequenceUi() {
+  const catalog = [...PRESETS, ...loadCustomPatterns()];
+  renderSequenceList($("seq-list"), SEQUENCE_PRESETS, loadCustomSequences(), state.sequenceId, pickSequence);
+  addSequenceRow($("seq-rows"), catalog, "trip", 4);
+  $("seq-add-row").onclick = () => addSequenceRow($("seq-rows"), [...PRESETS, ...loadCustomPatterns()], "trip", 4);
+  $("save-seq").onclick = () => {
+    const raw = readSequenceForm($("seq-name"), $("seq-rows"));
+    const draft = {
+      id: "s-" + Date.now(),
+      name: raw.name,
+      loop: $("seq-loop").checked,
+      shuffle: $("seq-shuffle").checked,
+      gate: { enabled: $("seq-gate").checked, cleanMin: +$("seq-gate-min").value || 80 },
+      segments: raw.segments,
+    };
+    const v = validateSequence(draft);
+    if (!v.ok) {
+      $("warn").hidden = false;
+      $("warn").textContent = v.error;
+      return;
+    }
+    saveCustomSequence(draft);
+    renderSequenceList($("seq-list"), SEQUENCE_PRESETS, loadCustomSequences(), draft.id, pickSequence);
+    pickSequence(draft);
+  };
 }
 
 function pickPattern(p) {
+  state.mode = "pattern";
+  state.sequence = null;
+  state.sequenceId = null;
   state.patternId = p.id;
   state.pattern = p.pattern;
   state.groove = p.groove || state.groove;
   state.cycle = p.cycle || inferCycle(p.pattern);
+  $("groove").value = state.groove;
+  fillPatternLabel();
+  persistUi();
+  closeModal("picker");
+}
+
+function pickSequence(seq) {
+  state.mode = "sequence";
+  state.sequence = hydrateSequence(seq, loadCustomPatterns());
+  state.sequenceId = seq.id;
+  const first = state.sequence.segments[0];
+  state.patternId = first.id;
+  state.pattern = first.pattern;
+  state.groove = first.groove;
+  state.cycle = inferCycle(first.pattern);
   $("groove").value = state.groove;
   fillPatternLabel();
   persistUi();
@@ -183,6 +272,10 @@ function inferCycle(pattern) {
 }
 
 function fillPatternLabel() {
+  if (state.sequence) {
+    $("pattern-btn").innerHTML = `<strong>${state.sequence.name}</strong><span class="pat-dots">${state.sequence.segments.map((s) => s.name).join(" → ")}</span>`;
+    return;
+  }
   const p = [...PRESETS, ...loadCustomPatterns()].find((x) => x.id === state.patternId);
   $("pattern-btn").innerHTML = `<strong>${p ? p.name : "Pattern"}</strong><span class="pat-dots">${renderDots(state.pattern)}</span>`;
 }
@@ -200,6 +293,7 @@ function setBpm(v) {
     state.grid = deriveSlots(state.pattern, state.bpm);
     state.clock.setGrid(state.grid);
     state.strip.setGrid(state.grid);
+    state.highway.setGrid(state.grid);
   }
 }
 
@@ -222,6 +316,7 @@ function persistUi() {
     pattern: state.pattern,
     groove: state.groove,
     bpm: state.bpm,
+    sequenceId: state.sequenceId,
   });
 }
 
@@ -241,7 +336,7 @@ function readSettingsForm() {
   settings.deviceId = $("set-device").value;
   settings.latencyCompMs = +$("set-lat").value;
   settings.compressionRatio = +$("set-comp").value || 1;
-  saveSettings({ ...settings, patternId: state.patternId, pattern: state.pattern, groove: state.groove, bpm: state.bpm });
+  saveSettings({ ...settings, patternId: state.patternId, pattern: state.pattern, groove: state.groove, bpm: state.bpm, sequenceId: state.sequenceId });
   if (state.worklet) {
     state.worklet.port.postMessage({ type: "config", relThr: relThr() });
   }
@@ -316,6 +411,9 @@ async function ensureAudio() {
     $("lat-badge").textContent = `${settings.latencyCompMs.toFixed(0)} ms`;
   }
   if (!state.scheduler) state.scheduler = createScheduler(state.ctx);
+  if (!state.takeRing || state.takeRing.sampleRate !== state.ctx.sampleRate) {
+    state.takeRing = createTakeRing(state.ctx.sampleRate);
+  }
   state.ctx.onstatechange = () => {
     if (state.ctx.state === "suspended" && (state.phase === "running" || state.phase === "countIn")) {
       pauseSession({ audioSuspend: true });
@@ -345,6 +443,14 @@ async function startSession() {
   }
   $("start").disabled = false;
 
+  if (state.mode === "sequence" && state.sequence) {
+    state.sequence = hydrateSequence(state.sequence, loadCustomPatterns());
+    state.segmentIndex = 0;
+    const first = state.sequence.segments[0];
+    state.pattern = first.pattern;
+    state.groove = first.groove;
+    state.cycle = inferCycle(first.pattern);
+  }
   const parsed = parsePattern(state.pattern);
   if (!parsed.ok) {
     $("warn").hidden = false;
@@ -362,7 +468,7 @@ async function startSession() {
     dropoutBars: settings.dropoutBars,
     dropoutEvery: settings.dropoutEvery,
     ramp: {
-      enabled: settings.rampEnabled,
+      enabled: state.sequence ? false : settings.rampEnabled,
       bpmStep: settings.bpmStep,
       everyBars: settings.everyBars,
       requireClean: settings.requireClean,
@@ -371,13 +477,17 @@ async function startSession() {
     latencyCompMs: settings.latencyCompMs,
     durationBars: null,
     compression: { ratio: settings.compressionRatio || 1 },
+    sequenceId: state.sequence?.id || null,
+    sequence: state.sequence ? structuredClone(state.sequence) : null,
   };
   state.scorer.reset();
   state.scorer.setRatio(settings.compressionRatio || 1);
   state.clock.reset();
   state.strip.reset();
+  state.highway.reset();
   state.clock.setGrid(grid);
   state.strip.setGrid(grid);
+  state.highway.setGrid(grid);
   state.ema = {};
   state.peakRoll = 1e-4;
   state.lastScores = null;
@@ -386,6 +496,10 @@ async function startSession() {
   state.barsAtSegmentStart = 0;
   state.segmentCountIn = settings.countInBars;
   state.nextLoop = 0;
+  state.pendingSwitch = null;
+  state.gateNote = "";
+  state.streakPulse = 0;
+  state.takeRing?.reset();
   state.startedAt = new Date().toISOString();
   hideReview();
 
@@ -397,7 +511,8 @@ async function startSession() {
   await requestWake();
   const t0 = state.ctx.currentTime + 0.12;
   state.sessionStart = t0;
-  state.scheduler.start(grid, state.config, t0, state.bpm);
+  state.segmentStart = t0;
+  state.scheduler.start(grid, state.config, t0, state.bpm, { segmentIndex: state.segmentIndex || 0 });
   setPhase(settings.countInBars > 0 ? "countIn" : "running");
   $("start").textContent = "Stop";
   $("start").classList.add("stop");
@@ -409,6 +524,7 @@ async function startSession() {
 function endSession(save) {
   cancelAnimationFrame(state.raf);
   state.scheduler?.stop();
+  stopReplay();
   releaseWake();
   const summary = currentSummary(true);
   setPhase("ended");
@@ -447,35 +563,23 @@ async function resumeSession() {
   if (state.ctx) await resumeContext(state.ctx);
   $("resume").hidden = true;
   hideReview();
+  state.pendingSwitch = null;
   state.segmentCountIn = 1;
   state.barsAtSegmentStart = state.barsDone;
   state.sessionLoopOffset = state.nextLoop;
   const t0 = state.ctx.currentTime + 0.12;
   state.sessionStart = t0;
+  state.segmentStart = t0;
   state.scheduler.start(
     state.grid,
     { ...state.config, countInBars: 1, bpm: state.scheduler.getBpm() },
     t0,
     state.scheduler.getBpm() || state.bpm,
-    { loopBase: state.sessionLoopOffset },
+    { loopBase: state.sessionLoopOffset, segmentIndex: state.segmentIndex || 0 },
   );
   setPhase("countIn");
   $("pause").textContent = "Pause";
   loop();
-}
-
-function reviewModel() {
-  const bpm = state.scheduler?.getBpm() || state.bpm;
-  return {
-    hits: state.scorer.hits,
-    missed: state.scorer.missed,
-    grid: state.grid,
-    gridStep: 60 / bpm / state.grid.slotsPerBeat,
-    dropoutBars: settings.dropoutBars,
-    dropoutEvery: settings.dropoutEvery,
-    ratio: state.scorer.getRatio(),
-    countInLoops: 0,
-  };
 }
 
 function showReview() {
@@ -486,6 +590,7 @@ function showReview() {
 }
 
 function hideReview() {
+  stopReplay();
   $("review-wrap").hidden = true;
   $("live-layout").hidden = false;
 }
@@ -511,7 +616,7 @@ function currentSummary(sessionWide) {
     ? state.scorer.hits.filter((h) => h.scored)
     : state.scorer.windowHits(settings.windowBars, state.grid.patternLength, now, beatDur);
   const slotsInWindow = settings.windowBars * state.grid.slots.length;
-  return state.scorer.summarize(
+  const sum = state.scorer.summarize(
     subset,
     state.grid.fingers,
     60 / bpm / state.grid.slotsPerBeat,
@@ -519,11 +624,33 @@ function currentSummary(sessionWide) {
     sessionWide ? Math.max(1, state.barsDone * state.grid.slots.length) : slotsInWindow,
     settings.accentRatio,
   );
+  const streak = state.scorer.getStreak();
+  sum.bestStreak = streak.bestStreak;
+  sum.streak = streak.streak;
+  if (sessionWide) {
+    const allHits = state.scorer.hits;
+    const missed = state.scorer.missed;
+    sum.perSlot = aggregatePerSlot(allHits, missed, state.grid.slots);
+    if (state.sequence) {
+      const slotsByPat = {};
+      for (const seg of state.sequence.segments) {
+        if (!slotsByPat[seg.pattern]) slotsByPat[seg.pattern] = deriveSlots(seg.pattern, bpm).slots;
+      }
+      sum.perSlotByPattern = perSlotByPattern(allHits, missed, slotsByPat);
+      const extra = summarizeSegments(allHits, missed, state.sequence, (seg) => deriveSlots(seg.pattern, bpm).gridStep);
+      sum.perSegment = extra.perSegment;
+      sum.transition = extra.transition;
+    }
+  }
+  return sum;
 }
 
 function onWorklet(ev) {
   const msg = ev.data;
   if (!msg) return;
+  if (msg.raw && msg.startFrame != null && state.takeRing) {
+    state.takeRing.write(msg.startFrame, msg.raw);
+  }
   if (msg.meter) {
     updateMeter(msg.meter.rms, msg.meter.peak);
     if (msg.meter.peak > state.lastMeterPeak * 3 && state.lastMeterPeak > 0.02) {
@@ -559,6 +686,9 @@ function onWorklet(ev) {
       state.clock.addHit(rec, step, rec.peak / state.peakRoll);
       state.strip.add(rec);
       if (rec.type === "hit" && rec.finger && rec.scored) updateEma(rec);
+      if (rec.type === "hit" && rec.scored && rec.grade === "perfect") {
+        state.streakPulse = performance.now();
+      }
     }
   }
   refreshLiveStats();
@@ -588,6 +718,7 @@ function refreshLiveStats() {
   renderScores($("scores"), sum.scores, sum.diagnosis, mic, {
     scoresHeard: sum.scoresHeard,
     ratio: state.scorer.getRatio(),
+    tallies: sum.tallies,
   });
 }
 
@@ -607,6 +738,26 @@ function loop() {
   state.clock.setDim(drop);
   state.clock.draw(pos, beatDur);
   state.strip.draw(step);
+  const upcoming = upcomingSegmentInfo(now, bpm, beatDur);
+  const streak = state.scorer.getStreak();
+  state.highway.draw({
+    now,
+    sessionStart: state.sessionStart,
+    step,
+    hits: state.scorer.hits,
+    missed: state.scorer.missed,
+    loopOffset: state.sessionLoopOffset,
+    countIn: state.segmentCountIn,
+    dropoutBars: settings.dropoutBars,
+    dropoutEvery: settings.dropoutEvery,
+    next: upcoming.next,
+    upcomingLabel: upcoming.label,
+    pulseSwitch: upcoming.pulse,
+    streak: streak.streak,
+    lastBreak: streak.lastBreak,
+    pulseAt: state.streakPulse,
+  });
+  maybeSwitchSegment(now, bpm, beatDur);
 
   state.scorer.sweep(state.scheduler.expectedEvents, step, now, (e) => {
     state.clock.addMiss(e.slot);
@@ -618,12 +769,227 @@ function loop() {
   $("bars").textContent = `${state.barsDone} bars`;
   $("phase").textContent = state.phase;
   $("bpm-val").textContent = String(Math.round(bpm));
+  if (state.sequence) {
+    const seg = state.sequence.segments[state.segmentIndex];
+    const barIn = Math.max(0, localLoop - state.segmentCountIn) + 1;
+    $("seq-stat").textContent = `segment ${state.segmentIndex + 1}/${state.sequence.segments.length} · bar ${Math.min(barIn, seg.bars)}/${seg.bars}${state.gateNote ? " · " + state.gateNote : ""}`;
+  } else {
+    $("seq-stat").textContent = "";
+  }
 
   maybeRamp(absLoop, now, beatDur);
 }
 
+function upcomingSegmentInfo(now, bpm, beatDur) {
+  if (!state.sequence) return { next: null, label: "", pulse: false };
+  const seg = state.sequence.segments[state.segmentIndex];
+  const boundary = segmentBoundary(state.segmentStart, seg, bpm);
+  const barsLeft = Math.max(0, (boundary - now) / (seg.bars ? (boundary - state.segmentStart) / seg.bars : beatDur));
+  let nextIdx = state.pendingSwitch?.next;
+  if (nextIdx == null) {
+    const clean = state.lastScores?.scores?.clean ?? 100;
+    nextIdx = pickNextSegmentIndex(state.sequence, state.segmentIndex, clean);
+  }
+  if (nextIdx < 0) nextIdx = state.segmentIndex;
+  const nextSeg = state.sequence.segments[nextIdx];
+  const nextGrid = deriveSlots(nextSeg.pattern, bpm);
+  const elapsed = boundary - state.sessionStart;
+  const localLoop = Math.max(0, Math.floor(elapsed / (beatDur * state.grid.patternLength)));
+  const label = nextIdx === state.segmentIndex && state.gateNote
+    ? state.gateNote
+    : `→ ${nextSeg.name} in ${Math.max(0, Math.ceil(barsLeft))} bars`;
+  const pulse = now >= boundary - (state.grid.patternLength * beatDur);
+  return {
+    next: {
+      grid: nextGrid,
+      step: nextGrid.gridStep,
+      boundaryTime: boundary,
+      loopOffset: state.sessionLoopOffset + localLoop,
+    },
+    label,
+    pulse,
+  };
+}
+
+function maybeSwitchSegment(now, bpm, beatDur) {
+  if (!state.sequence || state.phase !== "running") return;
+  const seg = state.sequence.segments[state.segmentIndex];
+  const boundary = segmentBoundary(state.segmentStart, seg, bpm);
+  if (!state.pendingSwitch && now >= boundary - 0.5) {
+    const clean = currentSummary(false)?.scores?.clean ?? 0;
+    let next = pickNextSegmentIndex(state.sequence, state.segmentIndex, clean);
+    if (next < 0) {
+      state.pendingSwitch = { boundary, next: state.segmentIndex, hold: true };
+      return;
+    }
+    if (next === state.segmentIndex && state.sequence.gate?.enabled && clean < state.sequence.gate.cleanMin) {
+      state.gateNote = `gate: repeat — clean ${clean.toFixed(0)} < ${state.sequence.gate.cleanMin}`;
+    } else {
+      state.gateNote = "";
+    }
+    const nextSeg = state.sequence.segments[next];
+    const nextGrid = deriveSlots(nextSeg.pattern, bpm);
+    const elapsed = boundary - state.sessionStart;
+    const localLoop = Math.max(0, Math.floor(elapsed / (beatDur * state.grid.patternLength)));
+    const loopBase = state.sessionLoopOffset + localLoop;
+    state.scheduler.setGridAt(nextGrid, boundary, {
+      loopBase,
+      segmentIndex: next,
+      groove: nextSeg.groove,
+    });
+    state.worklet?.port.postMessage({ type: "config", minGapS: 0.5 * nextGrid.gridStep, relThr: relThr() });
+    state.pendingSwitch = { boundary, next, nextGrid, nextSeg, loopBase };
+  }
+  if (state.pendingSwitch && !state.pendingSwitch.applied && now >= state.pendingSwitch.boundary) {
+    applyPendingSwitch();
+  }
+}
+
+function applyPendingSwitch() {
+  const p = state.pendingSwitch;
+  if (!p || p.hold) {
+    state.pendingSwitch = p ? { ...p, applied: true } : null;
+    return;
+  }
+  const bpm = state.scheduler.getBpm() || state.bpm;
+  state.barsAtSegmentStart = state.barsDone;
+  state.segmentCountIn = 0;
+  state.sessionLoopOffset = p.loopBase;
+  state.sessionStart = p.boundary;
+  state.segmentStart = p.boundary;
+  state.segmentIndex = p.next;
+  state.grid = p.nextGrid;
+  state.pattern = p.nextSeg.pattern;
+  state.groove = p.nextSeg.groove;
+  state.cycle = inferCycle(p.nextSeg.pattern);
+  state.clock.setGrid(state.grid);
+  state.strip.setGrid(state.grid);
+  state.highway.setGrid(state.grid);
+  $("groove").value = state.groove;
+  state.pendingSwitch = { ...p, applied: true };
+  void bpm;
+}
+
+function reviewModel() {
+  const bpm = state.scheduler?.getBpm() || state.bpm;
+  const base = {
+    hits: state.scorer.hits,
+    missed: state.scorer.missed,
+    dropoutBars: settings.dropoutBars,
+    dropoutEvery: settings.dropoutEvery,
+    ratio: state.scorer.getRatio(),
+    countInLoops: 0,
+    canReplay: canReplaySelection,
+  };
+  if (state.sequence) {
+    return {
+      ...base,
+      blocks: state.sequence.segments.map((seg, i) => {
+        const grid = deriveSlots(seg.pattern, bpm);
+        return { segmentIndex: i, label: seg.name, grid, gridStep: grid.gridStep };
+      }),
+    };
+  }
+  return {
+    ...base,
+    grid: state.grid,
+    gridStep: 60 / bpm / state.grid.slotsPerBeat,
+  };
+}
+
+function loopTimeRange(sel) {
+  const block = sel.block;
+  const step = block.gridStep;
+  let best = null;
+  const consider = (t, slotIndex) => {
+    const start = t - slotIndex * step;
+    if (best == null || start < best) best = start;
+  };
+  for (const h of state.scorer.hits) {
+    if (h.loop !== sel.loop || (h.segmentIndex ?? 0) !== sel.segmentIndex) continue;
+    if (h.event) consider(h.event.time, h.slotIndex);
+    else consider(h.t - (h.devMs || 0) / 1000, h.slotIndex);
+  }
+  for (const e of state.scorer.missed) {
+    if (e.loop !== sel.loop || (e.segmentIndex ?? 0) !== sel.segmentIndex) continue;
+    consider(e.time, e.slot.index);
+  }
+  if (best == null) return null;
+  return { tStart: best, tEnd: best + block.grid.slots.length * step, sel };
+}
+
+function canReplaySelection(sel) {
+  if (!sel || !state.takeRing || !state.ctx) return false;
+  const range = loopTimeRange(sel);
+  if (!range) return false;
+  const lat = settings.latencyCompMs / 1000;
+  const { f0 } = framesForRange(range.tStart, range.tEnd, state.ctx.sampleRate, lat);
+  return f0 >= state.takeRing.oldestFrame();
+}
+
+function replayLastBars(n) {
+  const bpm = state.scheduler?.getBpm() || state.bpm;
+  const beatDur = 60 / bpm;
+  const barDur = state.grid.patternLength * beatDur;
+  const times = state.scorer.hits.map((h) => h.t).concat(state.scorer.missed.map((e) => e.time));
+  if (!times.length) return;
+  const tEnd = Math.max(...times) + state.grid.gridStep;
+  playTake(Math.max(0, tEnd - n * barDur), tEnd, null);
+}
+
+function replayLoop(sel) {
+  const range = loopTimeRange(sel);
+  if (!range) return;
+  playTake(range.tStart, range.tEnd, sel);
+}
+
+function playTake(tStart, tEnd, sel) {
+  if ((state.phase !== "paused" && state.phase !== "ended") || !state.ctx || !state.takeRing) return;
+  const sr = state.ctx.sampleRate;
+  const lat = settings.latencyCompMs / 1000;
+  const { f0, f1 } = framesForRange(tStart, tEnd, sr, lat);
+  const slice = state.takeRing.sliceFrames(f0, f1);
+  if (!slice) {
+    $("replay-status").textContent = "take not in 30s buffer";
+    return;
+  }
+  stopReplay();
+  const buf = state.ctx.createBuffer(1, slice.samples.length, sr);
+  buf.getChannelData(0).set(slice.samples);
+  const when = state.ctx.currentTime + 0.05;
+  playBuf(state.ctx, buf, when, 1);
+  const kit = state.scheduler?.getKit();
+  const events = state.scheduler?.expectedEvents || [];
+  for (const e of events) {
+    if (e.time >= tStart && e.time < tEnd && kit?.click) {
+      playBuf(state.ctx, e.slot.sub === 0 ? kit.click1 || kit.click : kit.click, when + (e.time - tStart), e.slot.sub === 0 ? 0.8 : 0.35);
+    }
+  }
+  state.replayRange = { when, tStart, tEnd, duration: tEnd - tStart, sel };
+  $("replay-status").textContent = "playing";
+  const tick = () => {
+    if (!state.replayRange) return;
+    const p = (state.ctx.currentTime - state.replayRange.when) / state.replayRange.duration;
+    if (sel) state.review.setReplay({ loop: sel.loop, segmentIndex: sel.segmentIndex, progress: p });
+    if (p >= 1) {
+      stopReplay();
+      return;
+    }
+    state.replayTimer = requestAnimationFrame(tick);
+  };
+  state.replayTimer = requestAnimationFrame(tick);
+}
+
+function stopReplay() {
+  if (state.replayTimer) cancelAnimationFrame(state.replayTimer);
+  state.replayTimer = 0;
+  state.replayRange = null;
+  $("replay-status").textContent = "";
+  state.review?.setReplay(null);
+}
+
 function maybeRamp(loopIdx, now, beatDur) {
-  if (!settings.rampEnabled || state.phase !== "running") return;
+  if (state.sequence || !settings.rampEnabled || state.phase !== "running") return;
   const every = settings.everyBars;
   if (loopIdx <= 0 || loopIdx % every !== 0) return;
   if (state._lastRampLoop === loopIdx) return;
@@ -643,6 +1009,7 @@ function maybeRamp(loopIdx, now, beatDur) {
   state.grid = deriveSlots(state.pattern, next);
   state.clock.setGrid(state.grid);
   state.strip.setGrid(state.grid);
+  state.highway.setGrid(state.grid);
   state.worklet.port.postMessage({ type: "config", minGapS: 0.5 * state.grid.gridStep, relThr: relThr() });
   $("ramp-stat").textContent = `ramp → ${next}`;
 }
@@ -675,9 +1042,30 @@ async function openHistory() {
   renderHistory($("hist-list"), rows, (id) => {
     const s = rows.find((r) => r.id === id);
     if (!s) return;
-    renderHistoryChart($("hist-chart"), rows, s.config.patternId);
+    const pattern = s.config?.pattern || state.pattern;
+    renderHistoryChart($("hist-chart"), rows, s.config?.patternId);
+    showHeatmapFor(pattern, rows, s);
   });
+  const pats = [...new Set(rows.map((s) => s.config?.pattern).filter(Boolean))];
+  $("heatmap-pats").innerHTML = pats.map((p) => {
+    const meta = findPattern(p, loadCustomPatterns());
+    return `<button type="button" data-pat="${p}">${meta?.name || p}</button>`;
+  }).join("");
+  $("heatmap-pats").querySelectorAll("button").forEach((b) => {
+    b.onclick = () => showHeatmapFor(b.dataset.pat, rows);
+  });
+  if (pats[0]) showHeatmapFor(pats[0], rows);
   openModal("history");
+}
+
+function showHeatmapFor(pattern, rows) {
+  const meta = findPattern(pattern, loadCustomPatterns());
+  const grid = deriveSlots(pattern, 80);
+  const model = heatmapModel(pattern, grid.slots, rows, (text) => {
+    $("heatmap-readout").textContent = text;
+  });
+  $("heatmap-callout").textContent = model.callout || (meta ? meta.name : pattern);
+  state.heatmap.setModel(model);
 }
 
 function exportCsv() {

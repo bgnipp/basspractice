@@ -163,9 +163,17 @@ class OnsetDetectorProcessor extends AudioWorkletProcessor {
       meter = { rms: n ? Math.sqrt(s / n) : 0, peak: pk };
     }
 
-    if (onsets.length || meter) {
-      this.port.postMessage({ type: "block", onsets, meter, sampleRate: this.sr }, transfers);
-    }
+    const rawBlock = new Float32Array(ch0.length);
+    rawBlock.set(ch0);
+    transfers.push(rawBlock.buffer);
+    this.port.postMessage({
+      type: "block",
+      onsets,
+      meter,
+      sampleRate: this.sr,
+      raw: rawBlock,
+      startFrame: currentFrame,
+    }, transfers);
     return true;
   }
 }

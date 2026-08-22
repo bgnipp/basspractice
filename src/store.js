@@ -3,6 +3,7 @@ const IDB_STORE = "sessions";
 const LS_CUSTOM = "pluck.customPatterns";
 const LS_CAL = "pluck.calibration";
 const LS_SETTINGS = "pluck.settings";
+const LS_SEQ = "pluck.customSequences";
 
 function openDb() {
   return new Promise((resolve, reject) => {
@@ -114,4 +115,25 @@ export function loadSettings() {
 
 export function saveSettings(s) {
   localStorage.setItem(LS_SETTINGS, JSON.stringify(s));
+}
+
+export function loadCustomSequences() {
+  try {
+    return JSON.parse(localStorage.getItem(LS_SEQ) || "[]");
+  } catch {
+    return [];
+  }
+}
+
+export function saveCustomSequence(s) {
+  const all = loadCustomSequences().filter((x) => x.id !== s.id);
+  all.unshift(s);
+  localStorage.setItem(LS_SEQ, JSON.stringify(all));
+  return all;
+}
+
+export function deleteCustomSequence(id) {
+  const all = loadCustomSequences().filter((x) => x.id !== id);
+  localStorage.setItem(LS_SEQ, JSON.stringify(all));
+  return all;
 }

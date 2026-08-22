@@ -82,3 +82,91 @@ export function deriveSlots(patternStr, bpm) {
 export function validatePattern(str) {
   return parsePattern(str);
 }
+
+export const SEQUENCE_PRESETS = [
+  {
+    id: "ladder",
+    name: "Claypool ladder",
+    loop: true,
+    shuffle: false,
+    gate: { enabled: false, cleanMin: 80 },
+    segments: [
+      { id: "trip", bars: 4 },
+      { id: "pickup", bars: 4 },
+      { id: "gallop", bars: 4 },
+      { id: "revgallop", bars: 4 },
+      { id: "six16", bars: 2 },
+    ],
+  },
+  {
+    id: "gallopdrill",
+    name: "Gallop drill",
+    loop: true,
+    shuffle: false,
+    gate: { enabled: false, cleanMin: 80 },
+    segments: [
+      { id: "trip", bars: 2 },
+      { id: "gallop", bars: 4 },
+      { id: "disp1", bars: 4 },
+      { id: "disp2", bars: 4 },
+    ],
+  },
+  {
+    id: "reading",
+    name: "Reading drill",
+    loop: true,
+    shuffle: true,
+    gate: { enabled: false, cleanMin: 80 },
+    segments: [
+      { id: "trip", bars: 2 },
+      { id: "pickup", bars: 2 },
+      { id: "gallop", bars: 2 },
+      { id: "revgallop", bars: 2 },
+      { id: "six16", bars: 2 },
+    ],
+  },
+];
+
+export function findPattern(idOrPattern, extras = []) {
+  const catalog = [...PRESETS, ...extras];
+  return catalog.find((p) => p.id === idOrPattern || p.pattern === idOrPattern) || null;
+}
+
+export function validateSequence(seq) {
+  if (!seq || !Array.isArray(seq.segments) || !seq.segments.length) {
+    return { ok: false, error: "need at least one segment" };
+  }
+  for (const s of seq.segments) {
+    const p = s.pattern || findPattern(s.id)?.pattern;
+    const r = parsePattern(p || "");
+    if (!r.ok) return { ok: false, error: r.error };
+    if (!s.bars || s.bars < 1) return { ok: false, error: "bars must be >= 1" };
+  }
+  return { ok: true };
+}
+
+export function hydrateSequence(seq, extras = []) {
+  const catalog = [...PRESETS, ...extras];
+  const segments = (seq.segments || []).map((s) => {
+    const p = catalog.find((x) => x.id === s.id || x.pattern === s.pattern);
+    const pattern = s.pattern || p?.pattern;
+    return {
+      pattern,
+      bars: Math.max(1, Number(s.bars) || 1),
+      groove: s.groove || p?.groove || "click",
+      id: s.id || p?.id || pattern,
+      name: s.name || p?.name || pattern,
+    };
+  });
+  return {
+    id: seq.id,
+    name: seq.name || "Sequence",
+    loop: seq.loop !== false,
+    shuffle: !!seq.shuffle,
+    gate: {
+      enabled: !!(seq.gate && seq.gate.enabled),
+      cleanMin: Number(seq.gate?.cleanMin) || 80,
+    },
+    segments,
+  };
+}
