@@ -23,7 +23,7 @@ import {
   renderFingerBars, renderScores, renderPickerList, bindCustomEditor,
   renderSummary, renderHistory, renderHistoryChart, renderDots,
   renderSequenceList, addSequenceRow, readSequenceForm,
-} from "./ui/panels.js";
+} from "./ui/panels.js?v=2";
 
 const $ = (id) => document.getElementById(id);
 
