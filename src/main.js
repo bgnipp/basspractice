@@ -94,7 +94,16 @@ if (new URLSearchParams(location.search).get("dev") === "analyze") {
   const { mountAnalyze } = await import("../dev/analyze-file.js");
   mountAnalyze(document.getElementById("app"));
 } else {
-  boot();
+  try {
+    boot();
+  } catch (err) {
+    const box = document.getElementById("warn");
+    if (box) {
+      box.hidden = false;
+      box.textContent = "Boot failed: " + (err && err.message ? err.message : err);
+    }
+    console.error(err);
+  }
 }
 
 function boot() {

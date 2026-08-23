@@ -248,7 +248,7 @@ export function renderHistory(el, sessions, onOpen) {
     return `<button class="hist-row" data-id="${s.id}">
       <strong>${d.toLocaleString()}</strong>
       <span>${esc(s.config?.pattern || "")} @ ${s.config?.bpm}</span>
-      <em>T ${fmt(sc.timing)} · A ${fmt(sc.attackEven)} · C ${fmt(sc.clean)}${s.summary?.bestStreak ? ` · ×${s.summary.bestStreak}` : ""}</em>`
+      <em>T ${fmt(sc.timing)} · A ${fmt(sc.attackEven)} · C ${fmt(sc.clean)}${s.summary?.bestStreak ? ` · ×${s.summary.bestStreak}` : ""}</em>
     </button>`;
   }).join("");
   el.querySelectorAll(".hist-row").forEach((b) => {
